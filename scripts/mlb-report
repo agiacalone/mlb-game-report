@@ -945,7 +945,8 @@ def render_html(md_path: Path, body_class: str = "") -> Path | None:
     # AFTER the inline <style> so it overrides at equal specificity.
     style_block = f"<style>\n{css}\n</style>"
     overlay_link = '<link rel="stylesheet" href="/style.css">'
-    html = html.replace("</head>", f"{style_block}\n{overlay_link}\n</head>", 1)
+    nav_script = '<script src="/nav.js" defer></script>'
+    html = html.replace("</head>", f"{style_block}\n{overlay_link}\n{nav_script}\n</head>", 1)
     if body_class:
         html = html.replace("<body>", f'<body class="{body_class}">', 1)
     html_path.write_text(html)
