@@ -894,11 +894,13 @@ def build_report(game_pk: int, attended_meta: dict | None = None) -> tuple[str, 
         "date": game_date_iso,
         "away_slug": slugify(short_name(away_name)),
         "home_slug": slugify(short_name(home_name)),
+        "away_abbr": (away["team"].get("abbreviation") or "").upper(),
+        "home_abbr": (home["team"].get("abbreviation") or "").upper(),
     }
     return md, out_meta
 
 
-LIBRARY = Path.home() / "games-attended"
+LIBRARY = Path.home() / "mlb-games"
 CSS_FILE = Path(__file__).resolve().parent / "newspaper.css"
 
 
@@ -938,9 +940,12 @@ def render_html(md_path: Path, body_class: str = "") -> Path | None:
     )
     # Strip the stub title H1 pandoc injects from --metadata title= " "
     html = re.sub(r'<h1 class="title">[^<]*</h1>\s*', "", html, count=1)
-    # Inject our stylesheet at end of <head>
+    # Inject our stylesheet at end of <head>, plus a link to the
+    # deployed site's overlay sheet (team colors etc.). The link comes
+    # AFTER the inline <style> so it overrides at equal specificity.
     style_block = f"<style>\n{css}\n</style>"
-    html = html.replace("</head>", f"{style_block}\n</head>", 1)
+    overlay_link = '<link rel="stylesheet" href="/style.css">'
+    html = html.replace("</head>", f"{style_block}\n{overlay_link}\n</head>", 1)
     if body_class:
         html = html.replace("<body>", f'<body class="{body_class}">', 1)
     html_path.write_text(html)
@@ -1037,7 +1042,10 @@ def main() -> None:
 
     html_path: Path | None = None
     if args.html or args.open:
-        html_path = render_html(out_path)
+        body_class = ""
+        if out_meta.get("away_abbr") and out_meta.get("home_abbr"):
+            body_class = f"away-{out_meta['away_abbr']} home-{out_meta['home_abbr']}"
+        html_path = render_html(out_path, body_class=body_class)
         if html_path:
             print(f"Rendered {html_path}", file=sys.stderr)
 
