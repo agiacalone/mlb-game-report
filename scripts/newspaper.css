@@ -1,0 +1,208 @@
+/* mlb-game-report — newspaper stylesheet
+   A understated, classic-newspaper flavor: serif body, small-caps section
+   headers, narrow reading column, tight tables for box scores, decorative rules.
+*/
+
+:root {
+  --ink: #1a1a1a;
+  --paper: #fbf8f1;
+  --rule: #888;
+  --muted: #666;
+  --accent: #7a1717;
+  --serif: Georgia, "Times New Roman", "Iowan Old Style", serif;
+  --condensed: "Iowan Old Style", Georgia, Cambria, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
+
+html, body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+body {
+  max-width: 42rem;
+  margin: 2.5rem auto 6rem;
+  padding: 0 1.2rem;
+}
+
+/* Masthead / headline */
+h1 {
+  font-family: var(--condensed);
+  font-weight: 900;
+  font-size: 2.6rem;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  text-align: center;
+  margin: 0.2em 0 0.1em;
+  padding-bottom: 0.1em;
+  border-bottom: 1px solid var(--ink);
+}
+
+/* Subhead */
+h3:first-of-type {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.15rem;
+  text-align: center;
+  color: var(--muted);
+  margin: 0.4em 0 1.4em;
+  padding-bottom: 0.8em;
+  border-bottom: 3px double var(--rule);
+}
+
+/* Section headers: SMALL CAPS, rule underneath */
+h2 {
+  font-family: var(--condensed);
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin: 2.2em 0 0.6em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--ink);
+}
+
+h3 {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  font-style: italic;
+  margin: 1.4em 0 0.4em;
+  color: var(--ink);
+}
+
+/* Dateline ("ANGEL STADIUM, April 17, 2026.") — first bold-tagged line */
+p strong:first-child {
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+}
+
+/* Attended banner blockquote (first blockquote right after the subhead) */
+blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.5em 1em;
+  margin: 1.5em 0;
+  font-style: italic;
+  color: var(--muted);
+  background: rgba(122, 23, 23, 0.04);
+}
+
+blockquote em {
+  color: var(--ink);
+  font-style: italic;
+}
+
+/* Tables — tight, borderless box-score style */
+table {
+  border-collapse: collapse;
+  margin: 1em 0 1.6em;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95em;
+  width: 100%;
+}
+
+th, td {
+  padding: 0.22em 0.7em 0.22em 0;
+  text-align: left;
+  border-bottom: 1px solid #ddd;
+}
+
+th {
+  font-weight: 700;
+  border-bottom: 1.5px solid var(--ink);
+  text-transform: uppercase;
+  font-size: 0.8em;
+  letter-spacing: 0.08em;
+}
+
+/* AT A GLANCE fact-box table: no header row, first column bold */
+table:has(th:empty) th {
+  display: none;
+}
+
+table td:first-child strong {
+  font-variant: small-caps;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* Line score + box scores — center-align numeric columns */
+table td:not(:first-child), table th:not(:first-child) {
+  text-align: right;
+}
+
+/* Numbered PBP entries — newspaper agate feel */
+ol {
+  padding-left: 1.4em;
+}
+ol li {
+  margin-bottom: 0.6em;
+}
+ol li strong:first-child {
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+}
+
+/* Statcast sub-lines (the "↳ ..." continuation under each PBP entry) */
+ol li br + * , ol li {
+  color: inherit;
+}
+ol li {
+  font-size: 0.98em;
+}
+
+/* The "↳" statcast lines appear as trailing text in li; style via class if we want later */
+
+/* Horizontal rules — ornamental */
+hr {
+  border: 0;
+  text-align: center;
+  margin: 2em 0;
+}
+hr::before {
+  content: "§ § §";
+  color: var(--rule);
+  letter-spacing: 0.4em;
+  font-size: 0.9em;
+}
+
+/* Footer / source credit */
+p em:last-child {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+/* Monospace for frontmatter-looking blocks (shouldn't appear but just in case) */
+code {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+  background: rgba(0,0,0,0.04);
+  padding: 0 0.2em;
+  border-radius: 2px;
+}
+
+/* Links (index) */
+a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+a:hover {
+  border-bottom-color: var(--accent);
+}
+
+/* Print-friendly */
+@media print {
+  body { max-width: none; margin: 0.5in; font-size: 11pt; }
+  h1 { font-size: 28pt; }
+  h2 { font-size: 11pt; }
+  a { color: inherit; }
+  hr { page-break-after: avoid; }
+}
+
+/* Index page */
+body.index h1 { font-size: 2rem; }

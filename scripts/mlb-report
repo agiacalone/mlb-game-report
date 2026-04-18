@@ -10,17 +10,29 @@ Team may be a team ID (e.g. 108) or abbreviation (e.g. LAA, SD).
 from __future__ import annotations
 
 import argparse
+import math
+import re
 import sys
 import urllib.request
 import urllib.parse
 import json
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+import shutil
+import subprocess
 
 API = "https://statsapi.mlb.com/api/v1"
 API11 = "https://statsapi.mlb.com/api/v1.1"
 
-ORDINAL = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
-           6: "sixth", 7: "seventh", 8: "eighth", 9: "ninth"}
+ORDINAL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th",
+           6: "6th", 7: "7th", 8: "8th", 9: "9th", 10: "10th",
+           11: "11th", 12: "12th"}
+ORDINAL_WORD = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
+                6: "sixth", 7: "seventh", 8: "eighth", 9: "ninth"}
+
+# Statcast fielding position codes (1=P through 9=RF)
+POS = {1: "P", 2: "C", 3: "1B", 4: "2B", 5: "3B", 6: "SS", 7: "LF", 8: "CF", 9: "RF"}
 
 
 def fetch(url: str) -> dict:
@@ -56,13 +68,114 @@ def fmt_date(iso: str) -> str:
     return date(y, m, d).strftime("%B %-d, %Y")
 
 
-def ordinal(n: int) -> str:
+def weekday(iso: str) -> str:
+    from datetime import date
+    y, m, d = map(int, iso.split("-"))
+    return date(y, m, d).strftime("%A")
+
+
+def sun_event(lat: float, lon: float, d: _date, tz: ZoneInfo, zenith: float = 90.833, sunrise: bool = False) -> datetime | None:
+    """Compute sunrise/sunset on local date `d` at given lat/lon, returning an
+    aware datetime in timezone `tz`. NOAA algorithm; zenith=90.833 is official
+    sunset, 96.0 is civil twilight end. None at extreme latitudes."""
+    N = d.timetuple().tm_yday
+    lng_hour = lon / 15.0
+    t = N + (((6 if sunrise else 18) - lng_hour) / 24.0)
+    M = (0.9856 * t) - 3.289
+    L = M + (1.916 * math.sin(math.radians(M))) + (0.020 * math.sin(math.radians(2 * M))) + 282.634
+    L = L % 360
+    RA = math.degrees(math.atan(0.91764 * math.tan(math.radians(L))))
+    RA = RA % 360
+    Lq = (L // 90) * 90
+    RAq = (RA // 90) * 90
+    RA = (RA + (Lq - RAq)) / 15.0
+    sinDec = 0.39782 * math.sin(math.radians(L))
+    cosDec = math.cos(math.asin(sinDec))
+    cosH = (math.cos(math.radians(zenith)) - (sinDec * math.sin(math.radians(lat)))) / (cosDec * math.cos(math.radians(lat)))
+    if cosH > 1 or cosH < -1:
+        return None
+    H = math.degrees(math.acos(cosH))
+    if sunrise:
+        H = 360 - H
+    H = H / 15.0
+    T = H + RA - (0.06571 * t) - 6.622
+    UT = (T - lng_hour) % 24
+    # Convert UT to local clock time on date `d`
+    offset_hours = tz.utcoffset(datetime(d.year, d.month, d.day, 12)).total_seconds() / 3600
+    local = (UT + offset_hours) % 24
+    hh = int(local)
+    mm = int(round((local - hh) * 60))
+    if mm == 60:
+        hh += 1
+        mm = 0
+    hh %= 24
+    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=tz)
+
+
+def parse_first_pitch(first_pitch_str: str, game_date_iso: str, tz: ZoneInfo) -> datetime | None:
+    """Parse 'First pitch' like '6:39 PM.' into a local-tz datetime on the game's date."""
+    s = first_pitch_str.rstrip(". ").strip()
+    for fmt in ("%I:%M %p", "%H:%M"):
+        try:
+            t = datetime.strptime(s, fmt).time()
+            y, m, d = map(int, game_date_iso.split("-"))
+            return datetime(y, m, d, t.hour, t.minute, tzinfo=tz)
+        except ValueError:
+            continue
+    return None
+
+
+def fmt_local_time(dt: datetime) -> str:
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def fmt_ip(ip: str | float | None) -> str:
+    """Convert MLB's "5.2" innings-pitched notation to traditional 5⅔."""
+    if ip is None:
+        return "0"
+    s = str(ip)
+    if "." in s:
+        whole, frac = s.split(".", 1)
+        return whole + {"0": "", "1": "⅓", "2": "⅔"}.get(frac[:1], "." + frac)
+    return s
+
+
+def ord_abbr(n: int) -> str:
     return ORDINAL.get(n, f"{n}th")
+
+
+def ord_word(n: int) -> str:
+    return ORDINAL_WORD.get(n, f"{n}th")
 
 
 def short_name(full: str) -> str:
     parts = full.split()
     return parts[-1] if len(parts) > 1 else full
+
+
+def last_name(full: str) -> str:
+    # "Fernando Tatis Jr." → "Tatis Jr.", "José Soriano" → "Soriano"
+    parts = full.split()
+    if len(parts) >= 2 and parts[-1] in ("Jr.", "Sr.", "II", "III", "IV"):
+        return " ".join(parts[-2:])
+    return parts[-1] if parts else full
+
+
+def strip_period(s: str) -> str:
+    return s.rstrip(". ").strip()
+
+
+_SUFFIX_RE = re.compile(r"\b(Jr|Sr|II|III|IV)\.")
+
+
+def first_sentence(s: str) -> str:
+    # Condense a verbose MLB play description to its first clause.
+    # Protect name suffixes (Jr., Sr., II., III., IV.) so the split doesn't break on them.
+    s = s.strip()
+    protected = _SUFFIX_RE.sub(lambda m: m.group(1) + "\u0000", s)
+    m = re.match(r"^(.+?\.)(\s|$)", protected)
+    out = m.group(1) if m else protected
+    return out.replace("\u0000", ".")
 
 
 def top_batters(side: dict, n: int = 3) -> list[tuple[str, dict]]:
@@ -90,109 +203,157 @@ def describe_batter(name: str, s: dict) -> str:
     return f"{name} went {bits[0]}" + (" with " + ", ".join(bits[1:]) if len(bits) > 1 else "")
 
 
-def build_narrative(game: dict, box: dict, feed: dict, decisions: dict) -> list[str]:
+def build_lede(game: dict, box: dict, decisions: dict) -> str:
+    """AP-wire-style one-sentence lede: top hitter + winning pitcher → score + matchup + day."""
     away = game["teams"]["away"]
     home = game["teams"]["home"]
-    away_name = away["team"]["name"]
-    home_name = home["team"]["name"]
-    away_short = short_name(away_name)
-    home_short = short_name(home_name)
-    away_r = away["score"]
     home_r = home["score"]
-    winner, loser = (home, away) if home_r > away_r else (away, home)
-    w_name = winner["team"]["name"]
-    l_name = loser["team"]["name"]
-    w_short = short_name(w_name)
-    l_short = short_name(l_name)
+    away_r = away["score"]
+    w_team = home if home_r > away_r else away
+    l_team = away if home_r > away_r else home
+    w_name = w_team["team"]["name"]
+    l_name = l_team["team"]["name"]
     w_score, l_score = (home_r, away_r) if home_r > away_r else (away_r, home_r)
-    at_home = winner is home
-    venue = game.get("venue", {}).get("name", "")
+    at_home = w_team is home
+    verb = "blanked" if l_score == 0 else "defeated"
+    day = weekday(game["officialDate"])
+
+    w_side = box["teams"]["home" if at_home else "away"]
+    wp = decisions.get("winner", {}).get("fullName")
+
+    clauses: list[str] = []
+    # Lead hitter
+    tops = top_batters(w_side, 1)
+    if tops:
+        hname, hs = tops[0]
+        hit_clause = f"{last_name(hname)} went {hs.get('hits',0)} for {hs.get('atBats',0)}"
+        extras: list[str] = []
+        if hs.get("homeRuns", 0):
+            extras.append("a home run")
+        if hs.get("rbi", 0):
+            extras.append(f"{hs['rbi']} RBI")
+        if extras:
+            hit_clause += " with " + " and ".join(extras)
+        clauses.append(hit_clause)
+    # Starting pitcher
+    if wp:
+        starter = w_side["players"].get(f"ID{w_side['pitchers'][0]}") if w_side.get("pitchers") else None
+        pstats = starter and starter.get("stats", {}).get("pitching", {})
+        if pstats and starter["person"]["fullName"] == wp:
+            ip = fmt_ip(pstats.get("inningsPitched"))
+            runs = pstats.get("runs", 0)
+            ks = pstats.get("strikeOuts", 0)
+            if runs == 0:
+                clauses.append(f"{last_name(wp)} tossed {ip} scoreless innings with {ks} strikeouts")
+            else:
+                clauses.append(f"{last_name(wp)} worked {ip} innings, striking out {ks}")
+
+    who = " and ".join(clauses) if clauses else ""
+    body = f"the {w_name} {verb} the {l_name}, {w_score}–{l_score}, on {day}"
+    if who:
+        return f"{who} as {body}."
+    return f"The {w_name} {verb} the {l_name}, {w_score}–{l_score}, on {day}."
+
+
+def build_takeaways(game: dict, box: dict, feed: dict, decisions: dict, line: dict) -> list[str]:
+    """Three bullets: pitching, offense, turning point."""
+    away = game["teams"]["away"]
+    home = game["teams"]["home"]
+    home_r = home["score"]
+    away_r = away["score"]
+    w_team = home if home_r > away_r else away
+    l_team = away if home_r > away_r else home
+    at_home = w_team is home
+    w_side = box["teams"]["home" if at_home else "away"]
+    l_side = box["teams"]["away" if at_home else "home"]
+    w_short = short_name(w_team["team"]["name"])
+    l_short = short_name(l_team["team"]["name"])
 
     wp = decisions.get("winner", {}).get("fullName")
     lp = decisions.get("loser", {}).get("fullName")
     sv = decisions.get("save", {}).get("fullName")
 
-    w_side = box["teams"]["home" if at_home else "away"]
-    l_side = box["teams"]["away" if at_home else "home"]
-    w_top = top_batters(w_side, 3)
-    l_top = top_batters(l_side, 2)
+    bullets: list[str] = []
 
-    paras: list[str] = []
-
-    # Lede
-    lede = (f"{w_name} defeated the {l_name} {w_score}–{l_score} "
-            f"{'at home' if at_home else 'on the road'} {('at ' + venue + ' ') if venue and at_home else ''}"
-            f"on {fmt_date(game['officialDate'])}.")
-    if w_top:
-        name, s = w_top[0]
-        lede += f" {describe_batter(name, s)} to lead the offense."
-    paras.append(lede.replace("  ", " "))
-
-    # Pitching paragraph
+    # 1) Pitching bullet: winning starter + save/loser
+    pit_parts: list[str] = []
     if wp:
-        w_pitchers = w_side["pitchers"]
-        starter = w_side["players"].get(f"ID{w_pitchers[0]}") if w_pitchers else None
-        stats = starter and starter.get("stats", {}).get("pitching", {})
-        if stats and starter["person"]["fullName"] == wp:
-            pitch_line = (f"{wp} earned the win, going {stats.get('inningsPitched','0')} innings "
-                          f"and allowing {stats.get('runs',0)} run{'s' if stats.get('runs',0)!=1 else ''} "
-                          f"on {stats.get('hits',0)} hit{'s' if stats.get('hits',0)!=1 else ''} "
-                          f"with {stats.get('strikeOuts',0)} strikeout{'s' if stats.get('strikeOuts',0)!=1 else ''} "
-                          f"and {stats.get('baseOnBalls',0)} walk{'s' if stats.get('baseOnBalls',0)!=1 else ''}.")
+        starter = w_side["players"].get(f"ID{w_side['pitchers'][0]}") if w_side.get("pitchers") else None
+        pstats = starter and starter.get("stats", {}).get("pitching", {})
+        season = (starter.get("seasonStats", {}).get("pitching", {}) if starter else {}) or {}
+        if pstats and starter["person"]["fullName"] == wp:
+            ip = fmt_ip(pstats.get("inningsPitched"))
+            line_ = f"**{last_name(wp)} (W)** — {ip} IP, {pstats.get('hits',0)} H, {pstats.get('runs',0)} R, {pstats.get('earnedRuns',0)} ER, {pstats.get('baseOnBalls',0)} BB, {pstats.get('strikeOuts',0)} K"
+            if season.get("era"):
+                line_ += f" · season ERA {season['era']}"
+            pit_parts.append(line_)
         else:
-            pitch_line = f"{wp} picked up the win in relief."
-        if sv:
-            pitch_line += f" {sv} recorded the save."
-        if lp:
-            pitch_line += f" {lp} took the loss for {l_short}."
-        paras.append(pitch_line)
+            pit_parts.append(f"**{last_name(wp)} (W)** in relief")
+    if sv:
+        pit_parts.append(f"{last_name(sv)} (S)")
+    if lp:
+        l_pitchers = l_side.get("pitchers", [])
+        lp_p = next((l_side["players"].get(f"ID{pid}") for pid in l_pitchers if l_side["players"].get(f"ID{pid}", {}).get("person", {}).get("fullName") == lp), None)
+        lstats = lp_p and lp_p.get("stats", {}).get("pitching", {})
+        if lstats:
+            ip = fmt_ip(lstats.get("inningsPitched"))
+            pit_parts.append(f"**{last_name(lp)} (L)** — {ip} IP, {lstats.get('earnedRuns',0)} ER")
+        else:
+            pit_parts.append(f"**{last_name(lp)} (L)**")
+    if pit_parts:
+        bullets.append("**Pitching.** " + " · ".join(pit_parts) + ".")
 
-    # Scoring summary from plays
-    plays_data = feed.get("liveData", {}).get("plays", {})
-    scoring_idx = plays_data.get("scoringPlays", [])
-    all_plays = plays_data.get("allPlays", [])
-    # Group by half-inning
-    groups: dict[tuple[int, str], list[str]] = {}
-    for idx in scoring_idx:
-        if idx >= len(all_plays):
-            continue
-        pl = all_plays[idx]
-        inn = pl["about"]["inning"]
-        half = pl["about"]["halfInning"]
-        desc = pl["result"].get("description", "").strip()
-        groups.setdefault((inn, half), []).append(desc)
-
-    if groups:
-        scoring_paras: list[str] = []
-        for (inn, half), descs in sorted(groups.items()):
-            team = away_short if half == "top" else home_short
-            frame = f"{'top' if half == 'top' else 'bottom'} of the {ordinal(inn)}"
-            # Use first description; summarize if multiple
-            if len(descs) == 1:
-                body = descs[0]
-            else:
-                body = descs[0] + " " + " ".join(descs[1:])
-            scoring_paras.append(f"{team} struck in the {frame}: {body}")
-        # Merge into one or two paragraphs
-        paras.append(" ".join(scoring_paras))
-
-    # Supporting performances
-    extras = []
-    for name, s in w_top[1:]:
-        if s.get("hits", 0) >= 2 or s.get("rbi", 0) >= 1 or s.get("homeRuns", 0):
-            extras.append(describe_batter(name, s))
-    if extras:
-        paras.append(f"Also for {w_short}: " + "; ".join(extras) + ".")
-
+    # 2) Offense bullet: home runs + top hitter
+    hrs: list[str] = []
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    for pl in plays:
+        if pl["result"].get("event") == "Home Run":
+            batter = last_name(pl["matchup"]["batter"]["fullName"])
+            # which side?
+            half = pl["about"]["halfInning"]
+            team = short_name(away["team"]["name"]) if half == "top" else short_name(home["team"]["name"])
+            # Find season HR count from boxscore
+            side_key = "away" if half == "top" else "home"
+            pid = pl["matchup"]["batter"]["id"]
+            p = box["teams"][side_key]["players"].get(f"ID{pid}", {})
+            season_hr = (p.get("seasonStats", {}).get("batting", {}) or {}).get("homeRuns")
+            tag = f"({season_hr})" if season_hr else ""
+            hrs.append(f"{batter} {tag}, {team}".strip())
+    off_parts: list[str] = []
+    if hrs:
+        off_parts.append("HR: " + "; ".join(hrs))
+    w_top = top_batters(w_side, 2)
+    hot = [f"{last_name(n)} {s.get('hits',0)}-for-{s.get('atBats',0)}" + (f", {s['rbi']} RBI" if s.get('rbi', 0) else "") for n, s in w_top if s.get("hits", 0) >= 2 or s.get("rbi", 0) >= 1]
+    if hot:
+        off_parts.append(f"{w_short}: " + "; ".join(hot))
+    l_top = top_batters(l_side, 1)
     if l_top:
-        name, s = l_top[0]
-        if s.get("hits", 0) >= 1 or s.get("rbi", 0) >= 1:
-            paras.append(f"{l_short} was led at the plate by {describe_batter(name, s)}.")
+        n, s = l_top[0]
+        if s.get("hits", 0) >= 2 or s.get("rbi", 0) >= 1:
+            off_parts.append(f"{l_short}: {last_name(n)} {s.get('hits',0)}-for-{s.get('atBats',0)}")
+    if off_parts:
+        bullets.append("**Offense.** " + " · ".join(off_parts) + ".")
 
-    return paras
+    # 3) Turning point: biggest scoring inning for winner (or "wire-to-wire" if winner led after their first scoring inning)
+    innings = line.get("innings", [])
+    w_side_key = "home" if at_home else "away"
+    big_inn = None
+    big_runs = 0
+    for inn in innings:
+        r = inn.get(w_side_key, {}).get("runs", 0) or 0
+        if r > big_runs:
+            big_runs = r
+            big_inn = inn["num"]
+    if big_inn and big_runs >= 2:
+        bullets.append(f"**Turning point.** {w_short} plated **{big_runs} in the {ord_abbr(big_inn)}** to break the game open.")
+    elif big_inn:
+        bullets.append(f"**Turning point.** {w_short}'s decisive run came in the {ord_abbr(big_inn)}.")
+
+    return bullets
 
 
-def build_report(game_pk: int) -> str:
+def build_report(game_pk: int, attended_meta: dict | None = None) -> tuple[str, dict]:
+    attended_meta = attended_meta or {}
     sched = fetch(f"{API}/schedule?sportId=1&gamePk={game_pk}")
     game = sched["dates"][0]["games"][0]
     box = fetch(f"{API}/game/{game_pk}/boxscore")
@@ -215,24 +376,57 @@ def build_report(game_pk: int) -> str:
     sv = decisions.get("save", {}).get("fullName")
 
     # Headline + subhead
-    headline = f"{winner_name} Blank {short_name(loser_name)}" if l_score == 0 \
-        else f"{winner_name} Top {short_name(loser_name)}, {w_score}–{l_score}"
+    w_short_name = short_name(winner_name)
+    l_short_name = short_name(loser_name)
+    if l_score == 0:
+        headline = f"{w_short_name.upper()} BLANK {l_short_name.upper()}, {w_score}–0"
+    else:
+        headline = f"{w_short_name.upper()} TOP {l_short_name.upper()}, {w_score}–{l_score}"
+
     w_side = box["teams"]["home" if home_r > away_r else "away"]
     tops = top_batters(w_side, 1)
+    subhead_bits: list[str] = []
     if tops:
         tname, ts = tops[0]
-        subhead = f"*{short_name(tname)} leads {short_name(winner_name)} with {ts.get('hits',0)}-for-{ts.get('atBats',0)}" \
-                  + (f", {ts['homeRuns']} HR" if ts.get('homeRuns', 0) else "") \
-                  + (f", {ts['rbi']} RBI" if ts.get('rbi', 0) else "") + "*"
-    else:
-        subhead = ""
+        bit = f"{last_name(tname)} {ts.get('hits',0)}-for-{ts.get('atBats',0)}"
+        if ts.get("homeRuns", 0):
+            bit += f", {ts['homeRuns']} HR"
+        if ts.get("rbi", 0):
+            bit += f", {ts['rbi']} RBI"
+        subhead_bits.append(bit)
+    w_pitchers = w_side["pitchers"]
+    starter = w_side["players"].get(f"ID{w_pitchers[0]}") if w_pitchers else None
+    stats = starter and starter.get("stats", {}).get("pitching", {})
+    if stats and starter["person"]["fullName"] == wp:
+        subhead_bits.append(f"{last_name(wp)} fans {stats.get('strikeOuts',0)} over {fmt_ip(stats.get('inningsPitched'))} IP")
+    subhead = "### " + " · ".join(subhead_bits) if subhead_bits else ""
 
     venue = game.get("venue", {}).get("name", "")
-    dateline = f"**{venue.upper() if venue else 'MLB'} — {fmt_date(game['officialDate'])}.**"
+    dateline = f"**{venue.upper() if venue else 'MLB'}, {fmt_date(game['officialDate'])}.**"
 
-    paragraphs = build_narrative(game, box, feed, decisions)
-    first, rest = paragraphs[0], paragraphs[1:]
-    lede_para = f"{dateline} {first}"
+    lede_sentence = build_lede(game, box, decisions)
+    lede_para = f"{dateline} {lede_sentence}"
+    takeaways = build_takeaways(game, box, feed, decisions, line)
+    takeaways_block = "\n".join(f"- {b}" for b in takeaways) if takeaways else "_—_"
+
+    # Scoring runs: old-style one-line-per-run with running score
+    plays_data = feed.get("liveData", {}).get("plays", {})
+    all_plays = plays_data.get("allPlays", [])
+    scoring_idx = plays_data.get("scoringPlays", [])
+    scoring_lines: list[str] = []
+    for idx in scoring_idx:
+        if idx >= len(all_plays):
+            continue
+        pl = all_plays[idx]
+        inn = pl["about"]["inning"]
+        half = pl["about"]["halfInning"]
+        team_label = (short_name(away_name) if half == "top" else short_name(home_name)).upper()
+        desc = first_sentence(pl["result"].get("description", "").strip()).replace("\n", " ")
+        a = pl["result"].get("awayScore", 0)
+        h = pl["result"].get("homeScore", 0)
+        score_str = f"{short_name(away_name)} {a}, {short_name(home_name)} {h}"
+        scoring_lines.append(f"**{team_label} {ord_abbr(inn)}.** {desc} *{score_str}.*")
+    scoring_block = "\n\n".join(scoring_lines) if scoring_lines else "_No scoring plays._"
 
     # Line score
     innings = line.get("innings", [])
@@ -246,13 +440,118 @@ def build_report(game_pk: int) -> str:
             inn = next((x for x in innings if x["num"] == i), None)
             cells.append(str(inn[side].get("runs", "–")) if inn and side in inn else "–")
         t = line["teams"][side]
-        return f"| {team_name} | " + " | ".join(cells) + f" | {t.get('runs',0)} | {t.get('hits',0)} | {t.get('errors',0)} |"
+        return f"| {team_name} | " + " | ".join(cells) + f" | **{t.get('runs',0)}** | {t.get('hits',0)} | {t.get('errors',0)} |"
 
     line_table = "\n".join([header, sep, inning_row(away_name, "away"), inning_row(home_name, "home")])
 
+    # Play-by-play, itemized MLB Gameday-style with Statcast detail
+    log_entries: dict[tuple[int, str], list[dict]] = {}
+    inning_order: list[tuple[int, str]] = []
+    for pl in all_plays:
+        inn = pl["about"]["inning"]
+        half = pl["about"]["halfInning"]
+        key = (inn, half)
+        if key not in log_entries:
+            log_entries[key] = []
+            inning_order.append(key)
+        desc = pl["result"].get("description", "").strip().replace("\n", " ")
+        if not desc:
+            continue
+        log_entries[key].append(pl)
+
+    def statcast_line(pl: dict) -> str | None:
+        events = pl.get("playEvents", [])
+        pitches = [ev for ev in events if ev.get("isPitch")]
+        last_pitch = pitches[-1] if pitches else None
+        hit_ev = next((ev for ev in events if ev.get("hitData")), None)
+
+        bits: list[str] = []
+        if last_pitch:
+            pd = last_pitch.get("pitchData", {}) or {}
+            det = last_pitch.get("details", {}) or {}
+            ptype = (det.get("type") or {}).get("description") or (det.get("type") or {}).get("code")
+            speed = pd.get("startSpeed")
+            spin = (pd.get("breaks") or {}).get("spinRate")
+            if ptype and speed:
+                s = f"{ptype} {speed:.1f} mph"
+                if spin:
+                    s += f", {int(spin)} rpm"
+                bits.append(s)
+            elif speed:
+                bits.append(f"{speed:.1f} mph")
+
+        if hit_ev:
+            hd = hit_ev.get("hitData", {}) or {}
+            ls = hd.get("launchSpeed")
+            la = hd.get("launchAngle")
+            dist = hd.get("totalDistance")
+            traj = hd.get("trajectory")
+            loc = hd.get("location")
+            parts: list[str] = []
+            if ls is not None:
+                parts.append(f"EV {ls:.1f} mph")
+            if la is not None:
+                parts.append(f"LA {la:.0f}°")
+            if dist:
+                parts.append(f"{int(dist)} ft")
+            if traj:
+                parts.append(traj.replace("_", " "))
+            if loc:
+                try:
+                    parts.append(f"to {POS[int(loc)]}")
+                except (ValueError, KeyError):
+                    parts.append(f"to {loc}")
+            if parts:
+                bits.append("Batted: " + ", ".join(parts))
+
+        return " · ".join(bits) if bits else None
+
+    log_sections: list[str] = []
+    for (inn, half) in inning_order:
+        plays = log_entries[(inn, half)]
+        if not plays:
+            continue
+        bat_team = short_name(away_name) if half == "top" else short_name(home_name)
+        pit_team = short_name(home_name) if half == "top" else short_name(away_name)
+        header_line = f"### {half.capitalize()} {ord_abbr(inn)} — {bat_team} batting · {pit_team} pitching"
+        items: list[str] = []
+        last_pitcher: str | None = None
+        for i, pl in enumerate(plays, 1):
+            batter = last_name(pl["matchup"]["batter"]["fullName"])
+            pitcher = last_name(pl["matchup"]["pitcher"]["fullName"])
+            event = pl["result"].get("event", "").strip() or "Play"
+            desc = pl["result"].get("description", "").strip().replace("\n", " ")
+            pitch_count = len(pl.get("pitchIndex", []))
+            if not pitch_count:
+                pitch_count = sum(1 for ev in pl.get("playEvents", []) if ev.get("isPitch"))
+            count = pl.get("count", {})
+            b, s = count.get("balls", 0), count.get("strikes", 0)
+            meta_bits = [f"count {b}-{s}"]
+            if pitch_count:
+                meta_bits.append(f"{pitch_count} pitch{'es' if pitch_count != 1 else ''}")
+            scored = pl["about"].get("isScoringPlay", False)
+            a = pl["result"].get("awayScore", 0)
+            h = pl["result"].get("homeScore", 0)
+
+            if last_pitcher and pitcher != last_pitcher:
+                items.append(f"    *— Pitching change: {pitcher} replaces {last_pitcher}. —*")
+            last_pitcher = pitcher
+
+            row = f"{i}. **{batter}** (vs. {pitcher}) — *{event}.* {desc}"
+            if scored:
+                row += f" **[{short_name(away_name)} {a}, {short_name(home_name)} {h}]**"
+            row += f"  \n    ↳ " + ", ".join(meta_bits)
+            sc = statcast_line(pl)
+            if sc:
+                row += f"  \n    ↳ {sc}"
+            items.append(row)
+        log_sections.append(header_line + "\n\n" + "\n".join(items))
+    game_log = "\n\n".join(log_sections) if log_sections else "_No play-by-play data available._"
+
     def bat_table(side_key: str) -> str:
         side = box["teams"][side_key]
-        rows = ["| Player | Pos | AB | H | R | RBI | BB | K |", "|--------|-----|----|----|----|-----|----|----|"]
+        rows = ["| Player | Pos | AB | R | H | RBI | BB | K | AVG |", "|--------|-----|----|----|----|-----|----|----|-----|"]
+        totals = dict(ab=0, r=0, h=0, rbi=0, bb=0, k=0)
         for pid in side["batters"]:
             p = side["players"].get(f"ID{pid}")
             if not p:
@@ -262,7 +561,15 @@ def build_report(game_pk: int) -> str:
                 continue
             name = p["person"]["fullName"]
             pos = p.get("position", {}).get("abbreviation", "")
-            rows.append(f"| {name} | {pos} | {s.get('atBats',0)} | {s.get('hits',0)} | {s.get('runs',0)} | {s.get('rbi',0)} | {s.get('baseOnBalls',0)} | {s.get('strikeOuts',0)} |")
+            avg = (p.get("seasonStats", {}).get("batting", {}) or {}).get("avg", "—")
+            rows.append(f"| {name} | {pos} | {s.get('atBats',0)} | {s.get('runs',0)} | {s.get('hits',0)} | {s.get('rbi',0)} | {s.get('baseOnBalls',0)} | {s.get('strikeOuts',0)} | {avg} |")
+            totals["ab"] += s.get("atBats", 0)
+            totals["r"] += s.get("runs", 0)
+            totals["h"] += s.get("hits", 0)
+            totals["rbi"] += s.get("rbi", 0)
+            totals["bb"] += s.get("baseOnBalls", 0)
+            totals["k"] += s.get("strikeOuts", 0)
+        rows.append(f"| **Totals** | | **{totals['ab']}** | **{totals['r']}** | **{totals['h']}** | **{totals['rbi']}** | **{totals['bb']}** | **{totals['k']}** | |")
         return "\n".join(rows)
 
     dmap = {wp: "W", lp: "L"}
@@ -271,7 +578,7 @@ def build_report(game_pk: int) -> str:
 
     def pit_table(side_key: str) -> str:
         side = box["teams"][side_key]
-        rows = ["| Pitcher | IP | H | R | ER | BB | K |", "|---------|----|----|----|----|----|----|"]
+        rows = ["| Pitcher | IP | H | R | ER | BB | K | HR | ERA |", "|---------|----|----|----|----|----|----|----|-----|"]
         for pid in side["pitchers"]:
             p = side["players"].get(f"ID{pid}")
             if not p:
@@ -282,77 +589,418 @@ def build_report(game_pk: int) -> str:
             name = p["person"]["fullName"]
             tag = dmap.get(name, "")
             label = f"{name}{' ('+tag+')' if tag else ''}"
-            rows.append(f"| {label} | {s.get('inningsPitched','0')} | {s.get('hits',0)} | {s.get('runs',0)} | {s.get('earnedRuns',0)} | {s.get('baseOnBalls',0)} | {s.get('strikeOuts',0)} |")
+            era = (p.get("seasonStats", {}).get("pitching", {}) or {}).get("era", "—")
+            rows.append(f"| {label} | {fmt_ip(s.get('inningsPitched'))} | {s.get('hits',0)} | {s.get('runs',0)} | {s.get('earnedRuns',0)} | {s.get('baseOnBalls',0)} | {s.get('strikeOuts',0)} | {s.get('homeRuns',0)} | {era} |")
         return "\n".join(rows)
 
     info = {i.get("label"): i.get("value", "") for i in box.get("info", [])}
-    att = info.get("Att", "—")
-    dur = info.get("T", "—")
-    wx = info.get("Weather", "—")
-    wind = info.get("Wind", "")
-    first_pitch = info.get("First pitch", "—")
-    umps = info.get("Umpires", "—")
+    att = strip_period(info.get("Att", "—"))
+    dur = strip_period(info.get("T", "—"))
+    wx = strip_period(info.get("Weather", "—"))
+    wind = strip_period(info.get("Wind", ""))
+    first_pitch = strip_period(info.get("First pitch", "—"))
+    umps = strip_period(info.get("Umpires", "—")).replace("HP: ", "HP ").replace("1B: ", "1B ").replace("2B: ", "2B ").replace("3B: ", "3B ")
 
-    notable = ["WP", "Balk", "HBP", "Disengagement violations", "Pitch timer violations", "Pickoffs", "Ejections"]
-    notes_lines = [f"- **{k}:** {info[k]}" for k in notable if info.get(k)]
+    notable = ["WP", "Balk", "HBP", "IBB", "SB", "CS", "E", "DP",
+               "Disengagement violations", "Pitch timer violations", "Pickoffs", "Ejections"]
+    notes_lines = [f"- **{k}:** {strip_period(info[k])}" for k in notable if info.get(k)]
 
     away_rec = away["leagueRecord"]
     home_rec = home["leagueRecord"]
 
-    body_paras = "\n\n".join(rest)
+    at_glance = (
+        f"| | |\n|---|---|\n"
+        f"| **Final** | {winner_name} {w_score}, {loser_name} {l_score} |\n"
+        f"| **Venue** | {venue} · Att. {att} |\n"
+        f"| **Time** | {dur} · First pitch {first_pitch} |\n"
+        f"| **Weather** | {wx}{(' · Wind ' + wind) if wind else ''} |\n"
+        f"| **Winning pitcher** | {wp} |\n"
+        f"| **Losing pitcher** | {lp} |\n"
+        + (f"| **Save** | {sv} |\n" if sv else "")
+        + f"| **Umpires** | {umps} |\n"
+        f"| **Records** | {short_name(away_name)} {away_rec['wins']}–{away_rec['losses']} at {short_name(home_name)} {home_rec['wins']}–{home_rec['losses']} |"
+    )
 
-    md = f"""# {headline}
+    # --- ATMOSPHERE: sunlight, weather, Statcast standouts -------------------
+    venue_data = feed.get("gameData", {}).get("venue", {})
+    loc = venue_data.get("location", {}) or {}
+    coords = loc.get("defaultCoordinates", {}) or {}
+    tz_id = (venue_data.get("timeZone", {}) or {}).get("id")
+    day_night = feed.get("gameData", {}).get("datetime", {}).get("dayNight", "")
+
+    atmosphere_rows: list[str] = []
+    game_date_iso = game["officialDate"]
+    if coords.get("latitude") is not None and coords.get("longitude") is not None and tz_id:
+        tz = ZoneInfo(tz_id)
+        y, m, d = map(int, game_date_iso.split("-"))
+        gd = _date(y, m, d)
+        sunrise = sun_event(coords["latitude"], coords["longitude"], gd, tz, sunrise=True)
+        sunset = sun_event(coords["latitude"], coords["longitude"], gd, tz, sunrise=False)
+        civil_end = sun_event(coords["latitude"], coords["longitude"], gd, tz, zenith=96.0, sunrise=False)
+        fp_dt = parse_first_pitch(first_pitch, game_date_iso, tz) if first_pitch and first_pitch != "—" else None
+
+        sunlight_phrase = ""
+        if sunset and fp_dt:
+            delta_min = (sunset - fp_dt).total_seconds() / 60
+            if delta_min > 60:
+                sunlight_phrase = f"Day game — full sunlight through the early innings (sunset {fmt_local_time(sunset)})"
+            elif delta_min > 10:
+                sunlight_phrase = f"Late-afternoon start — sun still up at first pitch, setting at {fmt_local_time(sunset)}; middle innings slide into dusk"
+            elif delta_min > -30:
+                sunlight_phrase = f"Twilight start — first pitch right around sunset ({fmt_local_time(sunset)})"
+            else:
+                sunlight_phrase = f"Night game — sun already down at first pitch (sunset was {fmt_local_time(sunset)})"
+            if civil_end:
+                sunlight_phrase += f". Full dark around {fmt_local_time(civil_end)}"
+            sunlight_phrase += "."
+        elif sunset:
+            sunlight_phrase = f"Sunset {fmt_local_time(sunset)} local."
+
+        atmosphere_rows.append(f"- **Time of day.** {sunlight_phrase or day_night.title()}")
+        if sunrise:
+            atmosphere_rows.append(f"- **Sun.** Rise {fmt_local_time(sunrise)} · Set {fmt_local_time(sunset) if sunset else '—'}"
+                                   + (f" · Civil twilight ends {fmt_local_time(civil_end)}" if civil_end else ""))
+    elif day_night:
+        atmosphere_rows.append(f"- **Time of day.** {day_night.title()} game.")
+
+    atmosphere_rows.append(f"- **Weather.** {wx}" + (f" · Wind {wind}" if wind else ""))
+    if loc.get("city") and loc.get("stateAbbrev"):
+        atmosphere_rows.append(f"- **Where.** {venue}, {loc['city']}, {loc['stateAbbrev']} · elevation {loc.get('elevation','—')} ft · field azimuth {loc.get('azimuthAngle','—')}°")
+    atmosphere_rows.append(f"- **Crowd.** {att} · first pitch {first_pitch} · game time {dur}")
+
+    # Statcast standouts across all plays
+    all_plays_local = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    longest_hr = None  # (distance, batter, inning, half)
+    hardest_hit = None  # (EV, batter, event)
+    fastest_pitch = None  # (speed, pitcher, type, batter)
+    for pl in all_plays_local:
+        batter = last_name(pl["matchup"]["batter"]["fullName"])
+        pitcher = last_name(pl["matchup"]["pitcher"]["fullName"])
+        inn = pl["about"]["inning"]
+        half = pl["about"]["halfInning"]
+        evt = pl["result"].get("event", "")
+        for ev in pl.get("playEvents", []):
+            hd = ev.get("hitData") or {}
+            pd = ev.get("pitchData") or {}
+            det = ev.get("details") or {}
+            if hd.get("totalDistance") and evt == "Home Run":
+                dist = hd["totalDistance"]
+                if not longest_hr or dist > longest_hr[0]:
+                    longest_hr = (dist, batter, inn, half)
+            if hd.get("launchSpeed"):
+                ls = hd["launchSpeed"]
+                if not hardest_hit or ls > hardest_hit[0]:
+                    hardest_hit = (ls, batter, evt or "Ball in play")
+            if ev.get("isPitch") and pd.get("startSpeed"):
+                sp = pd["startSpeed"]
+                ptype = (det.get("type") or {}).get("description") or ""
+                if not fastest_pitch or sp > fastest_pitch[0]:
+                    fastest_pitch = (sp, pitcher, ptype, batter)
+
+    standouts: list[str] = []
+    if longest_hr:
+        dist, batter, inn, half = longest_hr
+        side = "away" if half == "top" else "home"
+        team = short_name(away_name if side == "away" else home_name)
+        standouts.append(f"Longest HR: **{batter}** ({team}), {int(dist)} ft in the {ord_abbr(inn)}")
+    if hardest_hit:
+        ev_, batter, evt = hardest_hit
+        standouts.append(f"Hardest-hit ball: **{batter}**, {ev_:.1f} mph ({evt})")
+    if fastest_pitch:
+        sp, pitcher, ptype, _ = fastest_pitch
+        ptype_s = f" {ptype}" if ptype else ""
+        standouts.append(f"Fastest pitch: **{pitcher}**, {sp:.1f} mph{ptype_s}")
+    if standouts:
+        atmosphere_rows.append("- **Statcast standouts.** " + " · ".join(standouts) + ".")
+
+    atmosphere_block = "\n".join(atmosphere_rows)
+
+    # --- MOMENT OF THE GAME: highest captivatingIndex ------------------------
+    moment = None
+    for pl in all_plays_local:
+        ci = pl.get("about", {}).get("captivatingIndex", 0) or 0
+        if not moment or ci > moment[0]:
+            moment = (ci, pl)
+    moment_block = ""
+    if moment and moment[1]:
+        ci, pl = moment
+        inn = pl["about"]["inning"]
+        half = pl["about"]["halfInning"]
+        half_word = "top" if half == "top" else "bottom"
+        batter = last_name(pl["matchup"]["batter"]["fullName"])
+        pitcher = last_name(pl["matchup"]["pitcher"]["fullName"])
+        desc = pl["result"].get("description", "").strip()
+        count = pl.get("count", {})
+        b, s_ = count.get("balls", 0), count.get("strikes", 0)
+        # Statcast on the moment
+        sc = None
+        for ev in pl.get("playEvents", []):
+            hd = ev.get("hitData") or {}
+            if hd.get("launchSpeed"):
+                parts = [f"{hd['launchSpeed']:.1f} mph exit velocity"]
+                if hd.get("launchAngle") is not None:
+                    parts.append(f"{hd['launchAngle']:.0f}° launch angle")
+                if hd.get("totalDistance"):
+                    parts.append(f"{int(hd['totalDistance'])} ft")
+                sc = ", ".join(parts)
+        moment_block = (
+            f"> _\u201c{desc}\u201d_\n>\n"
+            f"> — **{batter}** vs. **{pitcher}**, {half_word} of the {ord_abbr(inn)}, {b}-{s_} count."
+        )
+        if sc:
+            moment_block += f" {sc}."
+        moment_block += f" *(MLB captivating index: {ci}/100.)*"
+    else:
+        moment_block = "_—_"
+
+    # --- Attended-game section ----------------------------------------------
+    attended = attended_meta.get("attended")
+    seat_line = ""
+    companion_line = ""
+    if attended:
+        seat_parts = []
+        if attended_meta.get("section"):
+            seat_parts.append(f"Section **{attended_meta['section']}**")
+        if attended_meta.get("row"):
+            seat_parts.append(f"Row **{attended_meta['row']}**")
+        if attended_meta.get("seat"):
+            seat_parts.append(f"Seat **{attended_meta['seat']}**")
+        if seat_parts:
+            seat_line = " · ".join(seat_parts)
+        if attended_meta.get("companions"):
+            companion_line = "With: " + attended_meta["companions"]
+
+    attended_banner = ""
+    if attended:
+        bits = ["*Attended.*"]
+        if seat_line:
+            bits.append(seat_line)
+        if companion_line:
+            bits.append(companion_line)
+        attended_banner = "\n\n> " + " · ".join(bits) + "\n"
+
+    personal_notes_block = ""
+    if attended:
+        personal_notes_block = (
+            "## PERSONAL NOTES\n\n"
+            "<!-- Add your memories, impressions, and anything the box score can't capture. -->\n\n"
+            "_\u2014_\n\n"
+        )
+
+    # How it happened: short color graf built from scoring innings
+    innings_list = line.get("innings", [])
+    w_side_key = "home" if home_r > away_r else "away"
+    scoring_innings = [inn for inn in innings_list if (inn.get(w_side_key, {}).get("runs") or 0) > 0]
+    if scoring_innings:
+        parts = [f"{inn.get(w_side_key,{}).get('runs',0)} in the {ord_abbr(inn['num'])}" for inn in scoring_innings]
+        how_it_happened = f"{short_name(winner_name)} scored " + ", ".join(parts[:-1])
+        if len(parts) > 1:
+            how_it_happened += f", and {parts[-1]}"
+        else:
+            how_it_happened = f"{short_name(winner_name)} scored {parts[0]}"
+        how_it_happened += "."
+    else:
+        how_it_happened = ""
+
+    # Slugify team names for filenames
+    def slugify(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+    frontmatter = (
+        "---\n"
+        f"date: {game_date_iso}\n"
+        f"gamePk: {game_pk}\n"
+        f"venue: {venue}\n"
+        f"away_team: {away_name}\n"
+        f"home_team: {home_name}\n"
+        f"away_team_short: {short_name(away_name)}\n"
+        f"home_team_short: {short_name(home_name)}\n"
+        f"final_away: {away_r}\n"
+        f"final_home: {home_r}\n"
+        f"attended: {'true' if attended else 'false'}\n"
+        + (f"seat: {seat_line.replace('**','')}\n" if seat_line else "")
+        + "---\n"
+    )
+
+    md = f"""{frontmatter}
+# {headline}
 {subhead}
-
+{attended_banner}
 {lede_para}
-
-{body_paras}
 
 ---
 
-## Line Score
+## AT A GLANCE
+
+{at_glance}
+
+## KEY TAKEAWAYS
+
+{takeaways_block}
+
+## ATMOSPHERE
+
+{atmosphere_block}
+
+## MOMENT OF THE GAME
+
+{moment_block}
+
+## HOW IT HAPPENED
+
+{how_it_happened}
+
+## SCORING
+
+{scoring_block}
+
+## LINE SCORE
 
 {line_table}
 
-## Box Score — Batting
+## BOX SCORE — BATTING
 
-### {away_name}
+**{away_name}**
 
 {bat_table('away')}
 
-### {home_name}
+**{home_name}**
 
 {bat_table('home')}
 
-## Box Score — Pitching
+## BOX SCORE — PITCHING
 
-### {away_name}
+**{away_name}**
 
 {pit_table('away')}
 
-### {home_name}
+**{home_name}**
 
 {pit_table('home')}
 
-## Notes
+## NOTES
 
 {chr(10).join(notes_lines) if notes_lines else '_No notable events logged._'}
 
-- **Umpires:** {umps}
-- **First pitch:** {first_pitch} · **Attendance:** {att} · **Duration:** {dur} · **Weather:** {wx}{(' · Wind ' + wind) if wind else ''}
-- **Records:** {short_name(home_name)} {home_rec['wins']}–{home_rec['losses']} · {short_name(away_name)} {away_rec['wins']}–{away_rec['losses']}
+## PLAY-BY-PLAY
 
-_Source: MLB Stats API, gamePk {game_pk}._
+{game_log}
+
+{personal_notes_block}---
+
+*Source: MLB Stats API, gamePk {game_pk}.*
 """
-    return md
+    out_meta = {
+        "date": game_date_iso,
+        "away_slug": slugify(short_name(away_name)),
+        "home_slug": slugify(short_name(home_name)),
+    }
+    return md, out_meta
+
+
+LIBRARY = Path.home() / "games-attended"
+CSS_FILE = Path(__file__).resolve().parent / "newspaper.css"
+
+
+def render_html(md_path: Path, body_class: str = "") -> Path | None:
+    """Render md_path to a sibling .html using pandoc + bundled newspaper.css.
+    Returns the HTML path on success, None if pandoc is unavailable."""
+    if not shutil.which("pandoc"):
+        print("pandoc not found; skipping HTML render. `brew install pandoc` to enable.", file=sys.stderr)
+        return None
+    html_path = md_path.with_suffix(".html")
+    css = CSS_FILE.read_text() if CSS_FILE.exists() else ""
+    cmd = [
+        "pandoc",
+        "--from=gfm+yaml_metadata_block+smart",
+        "--to=html5",
+        "--standalone",
+        "--wrap=preserve",
+        "--variable=document-css=false",  # suppress pandoc's default <style>
+        "--metadata", "title= ",          # suppress auto title H1 from filename
+        "--metadata", "lang=en",
+        str(md_path),
+        "-o", str(html_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"pandoc failed: {e.stderr}", file=sys.stderr)
+        return None
+    html = html_path.read_text()
+    # Strip pandoc's default <style> block (starts with its "Default styles" comment)
+    html = re.sub(
+        r"<style>\s*/\*\s*Default styles provided by pandoc\..*?</style>",
+        "",
+        html,
+        count=1,
+        flags=re.DOTALL,
+    )
+    # Strip the stub title H1 pandoc injects from --metadata title= " "
+    html = re.sub(r'<h1 class="title">[^<]*</h1>\s*', "", html, count=1)
+    # Inject our stylesheet at end of <head>
+    style_block = f"<style>\n{css}\n</style>"
+    html = html.replace("</head>", f"{style_block}\n</head>", 1)
+    if body_class:
+        html = html.replace("<body>", f'<body class="{body_class}">', 1)
+    html_path.write_text(html)
+    return html_path
+
+
+def rebuild_index(library: Path) -> None:
+    """Scan library for .md reports with YAML frontmatter, rebuild INDEX.md sorted by date."""
+    entries: list[dict] = []
+    for p in sorted(library.glob("*.md")):
+        if p.name == "INDEX.md":
+            continue
+        txt = p.read_text().splitlines()
+        if not txt or txt[0].strip() != "---":
+            continue
+        meta: dict[str, str] = {}
+        for ln in txt[1:]:
+            if ln.strip() == "---":
+                break
+            if ":" in ln:
+                k, v = ln.split(":", 1)
+                meta[k.strip()] = v.strip()
+        if meta:
+            meta["_file"] = p.name
+            entries.append(meta)
+    entries.sort(key=lambda e: e.get("date", ""), reverse=True)
+    lines = ["# Games Attended", "", f"*{len(entries)} game{'s' if len(entries) != 1 else ''} in the log.*", "",
+             "| Date | Matchup | Final | Venue | Notes |",
+             "|------|---------|-------|-------|-------|"]
+    for e in entries:
+        matchup = f"{e.get('away_team','?')} at {e.get('home_team','?')}"
+        final = f"{e.get('home_team_short','?')} {e.get('final_home','?')}, {e.get('away_team_short','?')} {e.get('final_away','?')}"
+        notes = e.get("seat", "")
+        # Link to the HTML version if it exists, else the .md
+        html_sibling = (library / e["_file"]).with_suffix(".html")
+        link_target = html_sibling.name if html_sibling.exists() else e["_file"]
+        lines.append(f"| {e.get('date','')} | [{matchup}]({link_target}) | {final} | {e.get('venue','')} | {notes} |")
+    idx_md = library / "INDEX.md"
+    idx_md.write_text("\n".join(lines) + "\n")
+    # If pandoc is around and at least one HTML report exists, render INDEX.html too
+    if any((library / e["_file"]).with_suffix(".html").exists() for e in entries):
+        render_html(idx_md, body_class="index")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate a newspaper-style MLB game report.")
+    ap = argparse.ArgumentParser(description="Generate a newspaper-style MLB game briefing.")
     ap.add_argument("gamePk", nargs="?", type=int, help="MLB gamePk")
     ap.add_argument("--team", help="Team ID or abbreviation (use with --date)")
     ap.add_argument("--date", help="Game date YYYY-MM-DD (use with --team)")
-    ap.add_argument("-o", "--output", help="Output file (default: stdout)")
+    ap.add_argument("-o", "--output", help="Output file (default: ~/games-attended/<date>-<away>-at-<home>.md)")
+    ap.add_argument("--stdout", action="store_true", help="Print to stdout instead of writing a file")
+    g = ap.add_argument_group("attended-game metadata")
+    g.add_argument("--attended", action="store_true", help="Mark this report as a game you attended")
+    g.add_argument("--section", help="Seat section")
+    g.add_argument("--row", help="Seat row")
+    g.add_argument("--seat", help="Seat number")
+    g.add_argument("--with", dest="companions", help="Comma-separated names of who you attended with")
+    g.add_argument("--no-index", action="store_true", help="Skip rebuilding the INDEX.md")
+    ap.add_argument("--html", action="store_true", help="Also render a sibling .html via pandoc + newspaper stylesheet")
+    ap.add_argument("--open", action="store_true", help="Open the generated HTML in the default browser (implies --html)")
     args = ap.parse_args()
 
     if args.gamePk:
@@ -362,12 +1010,43 @@ def main() -> None:
     else:
         ap.error("Provide a gamePk or both --team and --date")
 
-    md = build_report(pk)
-    if args.output:
-        Path(args.output).write_text(md)
-        print(f"Wrote {args.output}", file=sys.stderr)
-    else:
+    attended_meta = {
+        "attended": args.attended,
+        "section": args.section,
+        "row": args.row,
+        "seat": args.seat,
+        "companions": args.companions,
+    }
+
+    md, out_meta = build_report(pk, attended_meta)
+
+    if args.stdout:
         sys.stdout.write(md)
+        return
+
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        LIBRARY.mkdir(parents=True, exist_ok=True)
+        fname = f"{out_meta['date']}-{out_meta['away_slug']}-at-{out_meta['home_slug']}.md"
+        out_path = LIBRARY / fname
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(md)
+    print(f"Wrote {out_path}", file=sys.stderr)
+
+    html_path: Path | None = None
+    if args.html or args.open:
+        html_path = render_html(out_path)
+        if html_path:
+            print(f"Rendered {html_path}", file=sys.stderr)
+
+    if not args.no_index and out_path.parent == LIBRARY:
+        rebuild_index(LIBRARY)
+        print(f"Updated {LIBRARY / 'INDEX.md'}", file=sys.stderr)
+
+    if args.open and html_path:
+        subprocess.run(["open", str(html_path)])
 
 
 if __name__ == "__main__":

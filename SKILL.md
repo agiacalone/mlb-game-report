@@ -1,6 +1,6 @@
 ---
 name: mlb-game-report
-description: Use when the user asks for an MLB game recap, box score, game log, or newspaper-style report for a specific MLB game — by team + date, or by gamePk. Produces a Markdown article with a written summary, line score, full batting and pitching box scores, and game notes, all sourced live from the MLB Stats API.
+description: Use when the user asks for an MLB game recap, box score, game log, newspaper-style report, or keepsake record of a specific MLB game — by team + date, or by gamePk. The primary use case is generating permanent keepsake logs of games Anthony attended in person, with atmosphere, sunlight timing, moment-of-the-game, Statcast standouts, and a personal-notes section. Also supports plain reports for games not attended.
 ---
 
 # MLB Game Report
@@ -23,23 +23,50 @@ There is a ready-made script at `scripts/mlb-report` (Python 3, stdlib only). Ru
 ### Invocation
 
 ```bash
-# By team abbreviation + date (preferred when user gives team and date)
-~/.claude/skills/mlb-game-report/scripts/mlb-report --team LAA --date 2026-04-17 -o /tmp/report.md
+# Attended-game keepsake (default use case — writes to ~/games-attended/, updates INDEX.md)
+~/.claude/skills/mlb-game-report/scripts/mlb-report --team LAA --date 2026-04-17 \
+    --attended --section 220 --row K --seat 14 --with "my daughter"
 
-# By gamePk (use when user gives an ID, or when you already have one from the schedule API)
+# Not attended — still ends up in ~/games-attended/ unless -o overrides
+~/.claude/skills/mlb-game-report/scripts/mlb-report 824048
+
+# Explicit output file
 ~/.claude/skills/mlb-game-report/scripts/mlb-report 824048 -o /tmp/report.md
 
-# Print to stdout (omit -o)
-~/.claude/skills/mlb-game-report/scripts/mlb-report 824048
+# Print to stdout
+~/.claude/skills/mlb-game-report/scripts/mlb-report 824048 --stdout
+
+# Also render a newspaper-styled HTML version (requires pandoc)
+~/.claude/skills/mlb-game-report/scripts/mlb-report --team LAA --date 2026-04-17 --attended --html
+
+# Render AND open in the browser
+~/.claude/skills/mlb-game-report/scripts/mlb-report --team LAA --date 2026-04-17 --attended --open
 ```
 
 The script accepts either a numeric team ID (e.g. `108`) or an abbreviation (`LAA`, `SD`, `NYY`, …).
 
-### Output path
+### Attended-game flags (primary use case)
 
-- If the user specifies a path or filename, honor it.
-- Otherwise default to `~/<team>-<date>.md` (e.g. `~/angels-2026-04-17.md`) in the user's home directory — consistent with how the first report was written.
-- Use `-o` to write directly; avoid piping stdout through `tee` or redirecting in the shell when a flag exists.
+- `--attended` — stamps an "Attended." banner below the subhead, adds a **PERSONAL NOTES** section at the bottom, and writes `attended: true` into the frontmatter
+- `--section`, `--row`, `--seat` — seat details shown in the banner and indexed
+- `--with "names, here"` — comma-separated companions, shown in the banner
+
+**Always pass `--attended` when the user says they went to the game, attended, was at the game, saw it live, etc.** The atmospherics, moment-of-the-game callout, and personal notes section are the whole point of this skill.
+
+### Output path & library
+
+- Default library: `~/games-attended/YYYY-MM-DD-<away_slug>-at-<home_slug>.md`
+- After every write, the script regenerates `~/games-attended/INDEX.md` (sorted by date, with seat info and score). Use `--no-index` to skip.
+- `-o PATH` overrides the default location but also disables automatic INDEX regeneration unless you point it back into `~/games-attended/`.
+- Files begin with YAML frontmatter so the index scanner can read them; do not strip the frontmatter when re-editing.
+
+### HTML rendering
+
+- `--html` renders a sibling `.html` using pandoc + the bundled `scripts/newspaper.css` stylesheet (classic newspaper look: serif body, small-caps section headers, narrow column, tight box-score tables, § § § ornamental rules).
+- The HTML is self-contained (styles inlined), so it opens in any browser and is safe to share.
+- `--open` implies `--html` and additionally launches the file in the default browser via `open`.
+- After any HTML write, `INDEX.md` links point to the `.html` sibling when it exists, and an `INDEX.html` is auto-generated too.
+- Requires `pandoc` (via `brew install pandoc`). Without it, the script still writes the Markdown and warns to stderr.
 
 ### When the user only specifies "yesterday" / "last night"
 
@@ -55,16 +82,22 @@ curl -s "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=YYYY-MM-DD&team
 
 ## What the report contains
 
-1. **Headline** — auto-generated (e.g. "Angels Blank Padres" for a shutout, otherwise "Winner Top Loser, R–R").
-2. **Subhead** — leading performer from the winning side.
-3. **Dateline + lede** — venue, date, final score, top performer.
-4. **Pitching paragraph** — WP line, save, LP.
-5. **Scoring summary** — paragraph-form recap of every scoring play, grouped by half-inning, built from `liveData.plays.scoringPlays`.
-6. **Supporting performances** — 2+ hit or multi-RBI games on both sides.
-7. **Line score table** (handles extra innings).
-8. **Full batting box** — AB/H/R/RBI/BB/K, away and home.
-9. **Full pitching box** — IP/H/R/ER/BB/K with W/L/S tags.
-10. **Notes** — WP, balks, HBP, pitch-timer violations, umpires, attendance, duration, weather, records.
+Structured as a **game briefing**: inverted-pyramid, skimmable at the top, fully detailed at the bottom. Preserves baseball traditions (ALL-CAPS newspaper headline, traditional line and box scores, IP fractions like 5⅔, W/L/S decision tags) while modernizing with fact boxes, key takeaway bullets, and Statcast detail.
+
+1. **ALL-CAPS newspaper headline** (e.g. "ANGELS BLANK PADRES, 8–0") and a subhead naming the top hitter and starting pitcher.
+2. **Dateline + AP-wire lede** — one sentence in classic wire style: *"Schanuel went 3 for 5 with 1 RBI and Soriano tossed 5⅔ scoreless innings with 8 strikeouts as the Los Angeles Angels blanked the San Diego Padres, 8–0, on Friday."*
+3. **AT A GLANCE** — two-column fact box: final, venue, att, time, weather, WP/LP/SV, umpires, team records. The single most-scannable block.
+4. **KEY TAKEAWAYS** — three bullets: **Pitching** (winner's line with season ERA + loser), **Offense** (home runs + top hitters on both sides), **Turning point** (biggest scoring inning).
+5. **ATMOSPHERE** — time-of-day classification with precise local sunset ("Late-afternoon start — sun still up at first pitch, setting at 7:24 PM; middle innings slide into dusk. Full dark around 7:50 PM."), sun rise/set/civil-twilight times, weather + wind, stadium location/elevation/field azimuth, crowd size, and **Statcast standouts** (longest HR, hardest-hit ball, fastest pitch).
+6. **MOMENT OF THE GAME** — a blockquote pulling the play with the highest MLB `captivatingIndex`, with matchup, count, Statcast numbers, and the MLB-provided description.
+7. **HOW IT HAPPENED** — one-sentence scoring-inning summary ("Angels scored 3 in the 2nd, 3 in the 4th, and 2 in the 5th.").
+8. **SCORING** — traditional one-line-per-run format: `**ANGELS 2nd.** Moncada homers to center. *Padres 0, Angels 1.*`
+9. **LINE SCORE** table (traditional; handles extra innings; bolds the R column).
+10. **BOX SCORE — BATTING** — AB/R/H/RBI/BB/K/AVG with totals row, away and home.
+11. **BOX SCORE — PITCHING** — IP (as 5⅔)/H/R/ER/BB/K/HR/ERA with W/L/S tags.
+12. **NOTES** — WP, balks, HBP, IBB, SB, CS, E, DP, pitch-timer violations, etc.
+13. **PLAY-BY-PLAY** — every plate appearance itemized MLB Gameday-style under a half-inning header (`### Bottom 2nd — Angels batting · Padres pitching`). Each item: batter (vs. pitcher), event type, full MLB description, scoring tag, count/pitch count, and a Statcast line with last pitch type/velocity/spin and (for balls in play) EV/LA/distance/trajectory/fielded position. Mid-inning pitching changes annotated.
+14. **PERSONAL NOTES** *(only if `--attended`)* — empty template section at the bottom for hand-editing memories.
 
 ## When the data isn't what you expect
 
