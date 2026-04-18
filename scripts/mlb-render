@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Render an MLB game report from a CSV dataset directory.
+
+No network I/O. Reads ``game.csv``, ``linescore.csv``, ``batting.csv``,
+``pitching.csv``, ``plays.csv``, ``pitches.csv`` and writes a Markdown file
+(optionally also a sibling HTML via pandoc).
+
+Usage:
+    mlb-render <dataset_dir> [-o OUTPUT] [--html] [--stdout]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shared import (  # noqa: E402
+    LIBRARY, read_dataset, rebuild_index, render_html, render_markdown,
+)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Render Markdown/HTML from an mlb-fetch dataset directory.")
+    ap.add_argument("dataset", help="Dataset directory (must contain game.csv).")
+    ap.add_argument("-o", "--output", help="Output .md path (default: <parent>/<slug>.md)")
+    ap.add_argument("--stdout", action="store_true", help="Print Markdown to stdout; no file written.")
+    ap.add_argument("--html", action="store_true")
+    ap.add_argument("--open", action="store_true")
+    ap.add_argument("--no-index", action="store_true")
+    args = ap.parse_args()
+
+    ds_dir = Path(args.dataset).expanduser().resolve()
+    if not ds_dir.is_dir():
+        sys.exit(f"Not a directory: {ds_dir}")
+    dataset = read_dataset(ds_dir)
+    md, out_meta = render_markdown(dataset)
+
+    if args.stdout:
+        sys.stdout.write(md)
+        return
+
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        # Write alongside (sibling of) the dataset dir with the same slug.
+        out_path = ds_dir.parent / f"{ds_dir.name}.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(md)
+    print(f"Wrote {out_path}", file=sys.stderr)
+
+    html_path = None
+    if args.html or args.open:
+        html_path = render_html(out_path)
+        if html_path:
+            print(f"Rendered {html_path}", file=sys.stderr)
+
+    if not args.no_index and out_path.parent == LIBRARY:
+        rebuild_index(LIBRARY)
+        print(f"Updated {LIBRARY / 'INDEX.md'}", file=sys.stderr)
+
+    if args.open and html_path:
+        import subprocess
+        subprocess.run(["open", str(html_path)])
+
+
+if __name__ == "__main__":
+    main()

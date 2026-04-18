@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""Fetch an MLB game from the Stats API and write a CSV dataset directory.
+
+No rendering is done here. The sibling ``mlb-render`` script reads the
+dataset and produces Markdown/HTML.
+
+Usage:
+    mlb-fetch <gamePk> [--out DIR]
+    mlb-fetch --team LAA --date 2026-04-17 [--out DIR]
+
+With no ``--out``, the dataset is written to
+``~/games-attended/<YYYY-MM-DD>-<away>-at-<home>/``.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shared import (  # noqa: E402
+    API, API11, EVENT_TAG, LIBRARY, NOTABLE_KEYS,
+    short_name, slugify, strip_period, write_dataset,
+)
+
+
+def fetch_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=20) as r:
+        return json.load(r)
+
+
+def resolve_team(team: str) -> int:
+    if team.isdigit():
+        return int(team)
+    data = fetch_json(f"{API}/teams?sportId=1")
+    t = team.upper()
+    for x in data["teams"]:
+        if t in (x["abbreviation"].upper(), x["teamCode"].upper(), x["fileCode"].upper()):
+            return x["id"]
+    sys.exit(f"Unknown team: {team}")
+
+
+def find_game(team_id: int, date: str) -> int:
+    q = urllib.parse.urlencode({"sportId": 1, "date": date, "teamId": team_id})
+    data = fetch_json(f"{API}/schedule?{q}")
+    games = [g for d in data["dates"] for g in d["games"]]
+    if not games:
+        sys.exit(f"No game found for team {team_id} on {date}")
+    if len(games) > 1:
+        print(f"Multiple games found; using first (gamePk={games[0]['gamePk']})", file=sys.stderr)
+    return games[0]["gamePk"]
+
+
+def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
+    attended_meta = attended_meta or {}
+    sched = fetch_json(f"{API}/schedule?sportId=1&gamePk={game_pk}")
+    game = sched["dates"][0]["games"][0]
+    box = fetch_json(f"{API}/game/{game_pk}/boxscore")
+    line = fetch_json(f"{API}/game/{game_pk}/linescore")
+    feed = fetch_json(f"{API11}/game/{game_pk}/feed/live")
+
+    away = game["teams"]["away"]
+    home = game["teams"]["home"]
+    away_name = away["team"]["name"]
+    home_name = home["team"]["name"]
+    away_short = short_name(away_name)
+    home_short = short_name(home_name)
+
+    decisions = feed["liveData"].get("decisions", {}) or {}
+    wp = decisions.get("winner", {}).get("fullName", "") or ""
+    lp = decisions.get("loser", {}).get("fullName", "") or ""
+    sv = decisions.get("save", {}).get("fullName") or ""
+
+    info_items = {i.get("label"): i.get("value", "") for i in box.get("info", [])}
+    notable = {k: strip_period(info_items[k]) for k in NOTABLE_KEYS if info_items.get(k)}
+
+    venue_data = feed.get("gameData", {}).get("venue", {}) or {}
+    loc = venue_data.get("location", {}) or {}
+    coords = loc.get("defaultCoordinates", {}) or {}
+    tz_id = (venue_data.get("timeZone", {}) or {}).get("id") or ""
+    day_night = feed.get("gameData", {}).get("datetime", {}).get("dayNight", "") or ""
+
+    # --- Plays + pitches ---
+    all_plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", []) or []
+    scoring_idx_set = set(feed.get("liveData", {}).get("plays", {}).get("scoringPlays", []) or [])
+
+    plays_rows: list[dict] = []
+    pitches_rows: list[dict] = []
+    captivating_play_idx: int | None = None
+    captivating_ci = -1
+    for idx, pl in enumerate(all_plays):
+        result = pl.get("result", {}) or {}
+        about = pl.get("about", {}) or {}
+        matchup = pl.get("matchup", {}) or {}
+        count = pl.get("count", {}) or {}
+        event = (result.get("event") or "").strip()
+        desc = (result.get("description") or "").strip().replace("\n", " ")
+        pitch_events = [ev for ev in pl.get("playEvents", []) if ev.get("isPitch")]
+        pc = len(pl.get("pitchIndex", []) or [])
+        if not pc:
+            pc = len(pitch_events)
+
+        # scoring tag; upstream uses isScoringPlay flag OR presence in scoringPlays list
+        is_scoring = bool(about.get("isScoringPlay")) or (idx in scoring_idx_set)
+        tag = EVENT_TAG.get(event, "")
+        if event == "Strikeout" and "called" in desc.lower():
+            tag = "Kc"
+
+        ci = int(about.get("captivatingIndex") or 0)
+        if ci > captivating_ci:
+            captivating_ci = ci
+            captivating_play_idx = idx
+
+        plays_rows.append({
+            "idx": idx,
+            "inning": about.get("inning"),
+            "half": about.get("halfInning"),
+            "batter": (matchup.get("batter") or {}).get("fullName", ""),
+            "batter_id": (matchup.get("batter") or {}).get("id", ""),
+            "pitcher": (matchup.get("pitcher") or {}).get("fullName", ""),
+            "pitcher_id": (matchup.get("pitcher") or {}).get("id", ""),
+            "event": event,
+            "event_tag": tag,
+            "description": desc,
+            "balls": count.get("balls", 0),
+            "strikes": count.get("strikes", 0),
+            "pitch_count": pc,
+            "away_score_after": result.get("awayScore", 0),
+            "home_score_after": result.get("homeScore", 0),
+            "is_scoring_play": is_scoring,
+            "captivating_index": ci,
+            "rbi": result.get("rbi", 0),
+        })
+
+        # Pitch rows — one per pitch event. Hit data is attached to whichever
+        # pitch event carries it (usually the last, contact pitch).
+        for pnum, ev in enumerate(pitch_events, 1):
+            pd = ev.get("pitchData") or {}
+            det = ev.get("details") or {}
+            hd = ev.get("hitData") or {}
+            type_info = det.get("type") or {}
+            call_info = det.get("call") or {}
+            coords_p = pd.get("coordinates") or {}
+            pitches_rows.append({
+                "play_idx": idx,
+                "pitch_num": pnum,
+                "type_code": type_info.get("code", ""),
+                "type_desc": type_info.get("description", ""),
+                "speed_mph": pd.get("startSpeed", ""),
+                "spin_rpm": (pd.get("breaks") or {}).get("spinRate", ""),
+                "call": call_info.get("description", ""),
+                "px": coords_p.get("pX", ""),
+                "pz": coords_p.get("pZ", ""),
+                "ev_mph": hd.get("launchSpeed", ""),
+                "la_deg": hd.get("launchAngle", ""),
+                "distance_ft": hd.get("totalDistance", ""),
+                "trajectory": hd.get("trajectory", ""),
+                "hit_location": hd.get("location", ""),
+                "hardness": hd.get("hardness", ""),
+            })
+
+    # Also capture hit events that aren't on a pitch (rare; mostly covered above).
+
+    # --- Linescore ---
+    innings = line.get("innings", []) or []
+    line_rows = [
+        {"inning": inn["num"],
+         "away_runs": inn.get("away", {}).get("runs", ""),
+         "home_runs": inn.get("home", {}).get("runs", "")}
+        for inn in innings
+    ]
+    tteams = line.get("teams", {}) or {}
+    line_rows += [
+        {"inning": "R", "away_runs": tteams.get("away", {}).get("runs", 0),
+         "home_runs": tteams.get("home", {}).get("runs", 0)},
+        {"inning": "H", "away_runs": tteams.get("away", {}).get("hits", 0),
+         "home_runs": tteams.get("home", {}).get("hits", 0)},
+        {"inning": "E", "away_runs": tteams.get("away", {}).get("errors", 0),
+         "home_runs": tteams.get("home", {}).get("errors", 0)},
+    ]
+
+    # --- Batting + pitching tables (ordered by boxscore's batters/pitchers lists) ---
+    decision_map = {wp: "W", lp: "L"}
+    if sv:
+        decision_map[sv] = "S"
+
+    batting_rows: list[dict] = []
+    pitching_rows: list[dict] = []
+    for side_key, team_short in (("away", away_short), ("home", home_short)):
+        side = box["teams"][side_key]
+        starters = set(side.get("battingOrder", []) or [])
+        for order, pid in enumerate(side.get("batters", []) or [], 1):
+            p = side["players"].get(f"ID{pid}")
+            if not p:
+                continue
+            s = p.get("stats", {}).get("batting") or {}
+            if not s or "atBats" not in s:
+                continue
+            season = p.get("seasonStats", {}).get("batting", {}) or {}
+            batting_rows.append({
+                "team": team_short,
+                "order": order,
+                "name": p["person"]["fullName"],
+                "player_id": pid,
+                "position": p.get("position", {}).get("abbreviation", ""),
+                "ab": s.get("atBats", 0),
+                "r": s.get("runs", 0),
+                "h": s.get("hits", 0),
+                "rbi": s.get("rbi", 0),
+                "bb": s.get("baseOnBalls", 0),
+                "k": s.get("strikeOuts", 0),
+                "hr": s.get("homeRuns", 0),
+                "avg_season": season.get("avg", ""),
+                "hr_season": season.get("homeRuns", ""),
+                "is_starter": pid in starters,
+            })
+        for order, pid in enumerate(side.get("pitchers", []) or [], 1):
+            p = side["players"].get(f"ID{pid}")
+            if not p:
+                continue
+            s = p.get("stats", {}).get("pitching") or {}
+            if not s or "inningsPitched" not in s:
+                continue
+            name = p["person"]["fullName"]
+            season = p.get("seasonStats", {}).get("pitching", {}) or {}
+            pitching_rows.append({
+                "team": team_short,
+                "order": order,
+                "name": name,
+                "player_id": pid,
+                "decision": decision_map.get(name, ""),
+                "ip": s.get("inningsPitched", ""),
+                "h": s.get("hits", 0),
+                "r": s.get("runs", 0),
+                "er": s.get("earnedRuns", 0),
+                "bb": s.get("baseOnBalls", 0),
+                "k": s.get("strikeOuts", 0),
+                "hr": s.get("homeRuns", 0),
+                "era_season": season.get("era", ""),
+                "pitches": s.get("numberOfPitches", ""),
+            })
+
+    umps = strip_period(info_items.get("Umpires", "—")).replace("HP: ", "HP ").replace("1B: ", "1B ").replace("2B: ", "2B ").replace("3B: ", "3B ")
+
+    away_rec = away.get("leagueRecord", {}) or {}
+    home_rec = home.get("leagueRecord", {}) or {}
+
+    game_row = {
+        "gamePk": game_pk,
+        "date": game["officialDate"],
+        "game_type": game.get("gameType", ""),
+        "status": (game.get("status", {}) or {}).get("detailedState", ""),
+        "venue": (game.get("venue", {}) or {}).get("name", ""),
+        "venue_id": (game.get("venue", {}) or {}).get("id", ""),
+        "city": loc.get("city", ""),
+        "state": loc.get("stateAbbrev", ""),
+        "lat": coords.get("latitude", ""),
+        "lon": coords.get("longitude", ""),
+        "elevation": loc.get("elevation", ""),
+        "azimuth": loc.get("azimuthAngle", ""),
+        "tz": tz_id,
+        "dayNight": day_night,
+        "first_pitch": strip_period(info_items.get("First pitch", "—")),
+        "sunrise": "", "sunset": "", "civil_twilight_end": "",
+        "duration": strip_period(info_items.get("T", "—")),
+        "attendance": strip_period(info_items.get("Att", "—")),
+        "weather": strip_period(info_items.get("Weather", "—")),
+        "wind": strip_period(info_items.get("Wind", "")),
+        "umpires": umps,
+        "away_team": away_name,
+        "away_team_id": away["team"]["id"],
+        "away_team_short": away_short,
+        "home_team": home_name,
+        "home_team_id": home["team"]["id"],
+        "home_team_short": home_short,
+        "away_score": away.get("score", 0),
+        "home_score": home.get("score", 0),
+        "winning_pitcher": wp,
+        "losing_pitcher": lp,
+        "save_pitcher": sv,
+        "away_record": f"{away_rec.get('wins','')}\u2013{away_rec.get('losses','')}" if away_rec else "",
+        "home_record": f"{home_rec.get('wins','')}\u2013{home_rec.get('losses','')}" if home_rec else "",
+        "attended": bool(attended_meta.get("attended")),
+        "seat_section": attended_meta.get("section") or "",
+        "seat_row": attended_meta.get("row") or "",
+        "seat_number": attended_meta.get("seat") or "",
+        "companions": attended_meta.get("companions") or "",
+        "captivating_play_idx": captivating_play_idx if captivating_play_idx is not None else "",
+        "notable_events_json": json.dumps(notable) if notable else "",
+    }
+
+    return {
+        "game": game_row,
+        "linescore": line_rows,
+        "batting": batting_rows,
+        "pitching": pitching_rows,
+        "plays": plays_rows,
+        "pitches": pitches_rows,
+    }
+
+
+def default_dataset_dir(dataset: dict) -> Path:
+    g = dataset["game"]
+    slug = f"{g['date']}-{slugify(g['away_team_short'])}-at-{slugify(g['home_team_short'])}"
+    return LIBRARY / slug
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Fetch an MLB game into a CSV dataset.")
+    ap.add_argument("gamePk", nargs="?", type=int)
+    ap.add_argument("--team")
+    ap.add_argument("--date")
+    ap.add_argument("--out", help="Dataset output directory (default ~/games-attended/<slug>/)")
+    # Attended metadata is persisted into the dataset so render is a pure read.
+    ap.add_argument("--attended", action="store_true")
+    ap.add_argument("--section")
+    ap.add_argument("--row")
+    ap.add_argument("--seat")
+    ap.add_argument("--with", dest="companions")
+    args = ap.parse_args()
+
+    if args.gamePk:
+        pk = args.gamePk
+    elif args.team and args.date:
+        pk = find_game(resolve_team(args.team), args.date)
+    else:
+        ap.error("Provide a gamePk or both --team and --date")
+
+    attended_meta = {
+        "attended": args.attended,
+        "section": args.section,
+        "row": args.row,
+        "seat": args.seat,
+        "companions": args.companions,
+    }
+    dataset = build_dataset(pk, attended_meta)
+    out_dir = Path(args.out) if args.out else default_dataset_dir(dataset)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    write_dataset(out_dir, dataset)
+    print(str(out_dir))
+
+
+if __name__ == "__main__":
+    main()
