@@ -20,6 +20,11 @@ html, body {
   font-family: var(--serif);
   font-size: 17px;
   line-height: 1.55;
+  /* Disable Safari/iOS text-size auto-adjustment. Without this, long-text
+     table cells (Play columns etc.) get silently boosted by Safari to
+     "improve readability", breaking our uniform font sizing. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -277,9 +282,23 @@ body.index h1 { font-size: 2rem; }
   }
   /* Ensure wide tables don't blow out the viewport. */
   ol, p, h1, h2, h3 { overflow-wrap: anywhere; }
-  table { display: block; overflow-x: auto; white-space: nowrap; }
-  /* Let the line-score + box-score tables keep their cell layout while scrolling. */
-  table > * { white-space: inherit; }
+  /* Tables shrink a bit and allow long Play/Description cells to wrap so they
+     don't push the table wider than the phone viewport. Line-score and
+     box-score tables live inside `.twocol > section` which already provides
+     its own `overflow-x: auto` for horizontal scrolling of numeric columns. */
+  /* All mobile tables match the box-score/pitching font size (~0.82em) so
+     SCORING, TOP 5 PLAYS, batting/pitching notes, and series-recap tables
+     share one compact scale. Long-text cells (Play descriptions) keep their
+     normal width and the table scrolls horizontally rather than squishing. */
+  /* Force every table and ALL its descendants to the compact box-score
+     scale. The universal descendant selector (`table *`) catches anything
+     pandoc emits inside a cell — spans, em, links — that would otherwise
+     inherit a larger size from the surrounding body text. */
+  table, table * { font-size: 1em !important; }
+  /* Horizontal-scroll container via `display: block` so long Play cells can
+     overflow rather than squish. */
+  table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table th, table td { white-space: nowrap; padding: 0.18em 0.4em; }
   /* Nav: match tightened body padding. */
   nav.site-nav { margin: -0.5rem -0.4rem 1rem; padding: 0.45rem 0.6rem; }
   /* Three-column notes card stacks on phones. */
