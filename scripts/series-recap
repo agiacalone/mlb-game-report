@@ -160,7 +160,7 @@ for i, g in enumerate(games, 1):
     bcast_html = SERIES / f"{slug}-broadcast.html"
     bcast_link = f"[radio call]({slug}-broadcast.html)" if bcast_html.exists() else "—"
     matchup = f"{team_pill(aw)} @ {team_pill(hm)}"
-    final = f"{team_pill(aw)} {to_int(ar)} · {team_pill(hm)} {to_int(hr)}"
+    final = f'<span class="score-num score-away">{to_int(ar)}</span>–<span class="score-num score-home">{to_int(hr)}</span>'
     lines.append(f"| {i} | {date} | {matchup} | {final} | {venue} | {log_link} | {bcast_link} |")
 
 # --- Series batting totals ------------------------------------------------

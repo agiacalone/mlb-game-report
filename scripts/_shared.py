@@ -1959,7 +1959,7 @@ def rebuild_index(library: Path) -> None:
         except ValueError:
             fa = fh = 0
         # Final column mirrors the matchup's away-home pill form (no @ separator).
-        final = f"{aw_pill} {fa} · {hm_pill} {fh}"
+        final = f'<span class="score-num score-away">{fa}</span>–<span class="score-num score-home">{fh}</span>'
         stem = Path(e["_file"]).stem
         html_sibling = (library / e["_file"]).with_suffix(".html")
         log_link = f"[log]({html_sibling.name})" if html_sibling.exists() else f"[log]({e['_file']})"

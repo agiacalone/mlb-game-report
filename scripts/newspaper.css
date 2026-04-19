@@ -362,7 +362,7 @@ body.index h1 { font-size: 2rem; }
   --color-DET: #0C2340;
   --color-HOU: #EB6E1F;
   --color-KC:  #004687;
-  --color-LAA: #BA0021;
+  --color-LAA: #BA0021;  --color-ANA: #BA0021;  /* 2002-era Anaheim Angels */
   --color-LAD: #005A9C;
   --color-MIA: #00A3E0;
   --color-MIL: #12284B;
@@ -401,7 +401,7 @@ body.home-COL, section.team-COL, .team-badge.team-COL { --team-primary: var(--co
 body.home-DET, section.team-DET, .team-badge.team-DET { --team-primary: var(--color-DET); --team-fg: #fff; }
 body.home-HOU, section.team-HOU, .team-badge.team-HOU { --team-primary: var(--color-HOU); --team-fg: #fff; }
 body.home-KC,  section.team-KC,  .team-badge.team-KC  { --team-primary: var(--color-KC);  --team-fg: #fff; }
-body.home-LAA, section.team-LAA, .team-badge.team-LAA { --team-primary: var(--color-LAA); --team-fg: #fff; }
+body.home-LAA, body.home-ANA, section.team-LAA, section.team-ANA, .team-badge.team-LAA, .team-badge.team-ANA { --team-primary: var(--color-LAA); --team-fg: #fff; }
 body.home-LAD, section.team-LAD, .team-badge.team-LAD { --team-primary: var(--color-LAD); --team-fg: #fff; }
 body.home-MIA, section.team-MIA, .team-badge.team-MIA { --team-primary: var(--color-MIA); --team-fg: #fff; }
 body.home-MIL, section.team-MIL, .team-badge.team-MIL { --team-primary: var(--color-MIL); --team-fg: #fff; }
@@ -436,7 +436,7 @@ body.away-COL { --team-secondary: var(--color-COL); }
 body.away-DET { --team-secondary: var(--color-DET); }
 body.away-HOU { --team-secondary: var(--color-HOU); }
 body.away-KC  { --team-secondary: var(--color-KC); }
-body.away-LAA { --team-secondary: var(--color-LAA); }
+body.away-LAA, body.away-ANA { --team-secondary: var(--color-LAA); }
 body.away-LAD { --team-secondary: var(--color-LAD); }
 body.away-MIA { --team-secondary: var(--color-MIA); }
 body.away-MIL { --team-secondary: var(--color-MIL); }
@@ -635,8 +635,21 @@ body ul li { margin: 0.12rem 0; }
   color: var(--team-fg, #fff);
   text-transform: uppercase;
   line-height: 1.4;
+  min-width: 2.6em;
+  text-align: center;
 }
 a .team-badge { border: none; }
+
+/* Right-aligned fixed-width score token used in the Final column of
+ * series-recap and main-INDEX tables, so 1-digit and 2-digit scores line
+ * up column-wise across rows. */
+.score-num {
+  display: inline-block;
+  min-width: 1.25em;
+  font-variant-numeric: tabular-nums;
+}
+.score-num.score-away { text-align: right; }
+.score-num.score-home { text-align: left; }
 
 /* ============================================================================
  * EXTERNAL REFERENCES — small "Also at:" row for BR / Stathead / FanGraphs
