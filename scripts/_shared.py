@@ -64,9 +64,14 @@ EVENT_TAG: dict[str, str] = {
     "Bunt Pop Out": "PO",
 }
 
-NOTABLE_KEYS = ["WP", "Balk", "HBP", "IBB", "SB", "CS", "E", "DP",
+NOTABLE_KEYS = ["WP", "PB", "Balk", "HBP", "IBB", "SB", "CS", "E", "DP",
                 "Disengagement violations", "Pitch timer violations",
                 "Pickoffs", "Ejections"]
+
+# Notable-event keys that belong in the NOTES section (game-context only).
+# Batting/pitching-specific items now render as their own notes blocks near
+# the boxes, so we filter them out here.
+NOTES_SECTION_KEYS = ["Disengagement violations", "Pitch timer violations", "Ejections"]
 
 CSS_FILE = Path(__file__).resolve().parent / "newspaper.css"
 LIBRARY = Path.home() / "games-attended"
@@ -327,6 +332,106 @@ def statcast_line_for_play(play_idx: int, pitches: list[dict]) -> str | None:
 
 # --- Renderer ---------------------------------------------------------------
 
+# --- Compact-pitch-type helper (drops trailing "Fastball") -----------------
+
+def _compact_ptype(ptype: str) -> str:
+    if not ptype:
+        return ptype
+    s = str(ptype)
+    # "Four-Seam Fastball" → "Four-Seam"; "Cutter Fastball" → "Cutter".
+    # Keep "Splitter", "Slider", etc. untouched.
+    if s.endswith(" Fastball"):
+        return s[: -len(" Fastball")]
+    return s
+
+
+def statcast_line_compact(play_idx: int, pitches: list[dict]) -> str | None:
+    """Dense one-segment Statcast annotation for inline PBP use.
+
+    Differences from :func:`statcast_line_for_play`:
+    - Strips the "Fastball" suffix from common pitch types
+    - Drops the "mph" unit from EV (still shown on pitch speed)
+    - Drops the "Batted:"/"Contact:" prefix
+    - Drops "to " before the fielder position
+    """
+    play_pitches = [p for p in pitches if p.get("play_idx") == play_idx]
+    if not play_pitches:
+        return None
+    last_pitch = play_pitches[-1]
+    hit_rows = [p for p in play_pitches if p.get("ev_mph") not in (None, "") or p.get("trajectory") or p.get("distance_ft") not in (None, "") or p.get("hardness")]
+    hit = hit_rows[-1] if hit_rows else None
+
+    bits: list[str] = []
+    ptype = _compact_ptype(last_pitch.get("type_desc") or last_pitch.get("type_code") or "")
+    speed = last_pitch.get("speed_mph")
+    spin = last_pitch.get("spin_rpm")
+    if ptype and speed not in (None, ""):
+        s = f"{ptype} {float(speed):.1f} mph"
+        if spin not in (None, ""):
+            s += f", {int(float(spin))} rpm"
+        bits.append(s)
+    elif speed not in (None, ""):
+        bits.append(f"{float(speed):.1f} mph")
+
+    if hit:
+        ls = hit.get("ev_mph")
+        la = hit.get("la_deg")
+        dist = hit.get("distance_ft")
+        traj = hit.get("trajectory")
+        loc = hit.get("hit_location")
+        hard = hit.get("hardness")
+        parts: list[str] = []
+        numeric_present = any(v not in (None, "") for v in (ls, la, dist))
+        if ls not in (None, ""):
+            parts.append(f"EV {float(ls):.1f}")
+        if la not in (None, ""):
+            parts.append(f"LA {float(la):.0f}°")
+        if dist not in (None, ""):
+            parts.append(f"{int(float(dist))} ft")
+        if traj:
+            parts.append(str(traj).replace("_", " "))
+        if loc not in (None, ""):
+            try:
+                parts.append(f"{POS[int(float(loc))]}")
+            except (ValueError, KeyError):
+                parts.append(f"{loc}")
+        if not numeric_present and hard:
+            # Historical fallback: "medium-hit ground ball, 1B"
+            prefix = f"{str(hard).lower()}-hit"
+            # Prepend hardness to the first non-numeric bit (usually trajectory).
+            parts = [prefix + (" " + parts[0] if parts else "")] + parts[1:]
+        if parts:
+            bits.append(", ".join(parts))
+
+    return " · ".join(bits) if bits else None
+
+
+# --- Weather + wind glyphs --------------------------------------------------
+
+def weather_glyph(weather: str) -> str:
+    w = (weather or "").lower()
+    # Order matters: check dome/thunder/snow before generic cloud/rain.
+    if "dome" in w or "roof closed" in w:
+        return "\u26e8"  # ⛨
+    if "thunder" in w or "storm" in w:
+        return "\u26c8"  # ⛈
+    if "snow" in w:
+        return "\u2744"  # ❄
+    if "drizzle" in w:
+        return "\U0001f326"  # 🌦
+    if "rain" in w or "shower" in w:
+        return "\U0001f327"  # 🌧
+    if "fog" in w or "mist" in w:
+        return "\U0001f32b"  # 🌫
+    if "partly cloudy" in w:
+        return "\u26c5"  # ⛅
+    if "cloud" in w or "overcast" in w:
+        return "\u2601"  # ☁
+    if "clear" in w or "sunny" in w or "fair" in w:
+        return "\u2600"  # ☀
+    return "\u2022"  # •
+
+
 def _top_batters(batting: list[dict], team_short: str, n: int = 3) -> list[dict]:
     rows = [b for b in batting if b.get("team") == team_short
             and b.get("ab") not in (None, "") and int(b.get("ab") or 0) > 0]
@@ -500,20 +605,24 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     takeaways_block = "\n".join(f"- {b}" for b in bullets) if bullets else "_—_"
 
-    # --- Scoring ---
-    scoring_lines: list[str] = []
+    # --- Scoring (compact two-column table) ---
+    scoring_rows: list[str] = []
     for pl in plays:
         if not pl.get("is_scoring_play"):
             continue
         inn = int(pl["inning"])
         team_label = (away_short if pl["half"] == "top" else home_short).upper()
-        desc = first_sentence((pl.get("description") or "").strip()).replace("\n", " ")
+        desc = first_sentence((pl.get("description") or "").strip()).replace("\n", " ").rstrip(". ")
         a = int(pl.get("away_score_after") or 0)
         h = int(pl.get("home_score_after") or 0)
-        score_str = f"{away_short} {a}, {home_short} {h}"
-        marker = "⚾ " if pl.get("event") == "Home Run" else ""
-        scoring_lines.append(f"{marker}**{team_label} {ord_abbr(inn)}.** {desc} *{score_str}.*")
-    scoring_block = "\n\n".join(scoring_lines) if scoring_lines else "_No scoring plays._"
+        glyph = "⚾" if pl.get("event") == "Home Run" else "·"
+        scoring_rows.append(f"| {glyph} {team_label} {ord_abbr(inn)} | {desc}. | {a}\u2013{h} |")
+    if scoring_rows:
+        hdr = f"| Inn | Play | Score ({away_short}\u2013{home_short}) |"
+        sep = "|-----|------|-------------|"
+        scoring_block = "\n".join([hdr, sep] + scoring_rows)
+    else:
+        scoring_block = "_No scoring plays._"
 
     # --- Line score ---
     inning_rows = [i for i in linescore if i.get("inning") not in ("R", "H", "E")]
@@ -585,16 +694,18 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
                 items.append(f"    *— Pitching change: {last_pitcher} → {pitcher}. —*")
             last_pitcher = pitcher
 
-            event_marker = " ⚾" if event == "Home Run" else ""
+            event_marker = "⚾ " if event == "Home Run" else ""
             tag = pl.get("event_tag") or ""
             tag_prefix = f"`{tag}` " if tag else ""
-            row = f"{i}. {tag_prefix}**{batter}** (vs. {pitcher}) — *{event}.*{event_marker} {desc}"
+            # Compact single-line format: count "B-S, NP" (one pitch shows as "1P").
+            count_bit = f"{b}-{s}, {pitch_count}P" if pitch_count else f"{b}-{s}"
+            row = f"{i}. {tag_prefix}{event_marker}**{batter}** vs. {pitcher} — {desc}"
             if scored:
                 row += f" **[{away_short} {a}, {home_short} {h}]**"
-            row += f"  \n    ↳ " + ", ".join(meta_bits)
-            sc = statcast_line_for_play(int(pl["idx"]), pitches)
+            row += f" · {count_bit}"
+            sc = statcast_line_compact(int(pl["idx"]), pitches)
             if sc:
-                row += f"  \n    ↳ {sc}"
+                row += f" · {sc}"
             items.append(row)
         log_sections.append(header_line + "\n\n" + "\n".join(items))
     game_log = "\n\n".join(log_sections) if log_sections else "_No play-by-play data available._"
@@ -700,20 +811,9 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         atmosphere_rows.append(f"- **Time of day.** {day_night.title()} game.")
 
     if wx and wx != "—":
-        wx_lower = str(wx).lower()
-        if "dome" in wx_lower or "roof closed" in wx_lower:
-            wx_glyph = "⛨"
-        elif "snow" in wx_lower:
-            wx_glyph = "❄"
-        elif "rain" in wx_lower or "drizzle" in wx_lower or "shower" in wx_lower:
-            wx_glyph = "☂"
-        elif "cloud" in wx_lower or "overcast" in wx_lower:
-            wx_glyph = "☁"
-        elif "clear" in wx_lower or "sunny" in wx_lower or "fair" in wx_lower:
-            wx_glyph = "☀"
-        else:
-            wx_glyph = "•"
-        atmosphere_rows.append(f"- **Weather.** {wx_glyph} {wx}" + (f" · Wind {wind}" if wind else ""))
+        wx_glyph = weather_glyph(str(wx))
+        wind_clause = f" · \U0001f4a8 Wind {wind}" if wind else ""
+        atmosphere_rows.append(f"- **Weather.** {wx_glyph} {wx}{wind_clause}")
     if g.get("city") and g.get("state"):
         atmosphere_rows.append(
             f"- **Where.** {venue}, {g['city']}, {g['state']} · elevation {g.get('elevation','—') or '—'} ft · field azimuth {g.get('azimuth','—') or '—'}°"
@@ -857,33 +957,162 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
             "_\u2014_\n\n"
         )
 
-    # --- How it happened ---
-    w_side_key = "home" if at_home else "away"
-    scoring_innings = []
-    for inn in inning_rows:
-        r = int((inn.get(f"{w_side_key}_runs")) or 0)
-        if r > 0:
-            scoring_innings.append((int(inn["inning"]), r))
-    if scoring_innings:
-        parts = [f"{r} in the {ord_abbr(n)}" for n, r in scoring_innings]
-        if len(parts) > 1:
-            how_it_happened = f"{winner_short} scored " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
-        else:
-            how_it_happened = f"{winner_short} scored {parts[0]}."
-    else:
-        how_it_happened = ""
-
-    # --- Notes block ---
-    notes_lines: list[str] = []
+    # --- Notable events blob ---
+    notable: dict = {}
     notable_json = g.get("notable_events_json")
     if notable_json:
         try:
             notable = json.loads(notable_json) if isinstance(notable_json, str) else notable_json
-            for k in NOTABLE_KEYS:
-                if notable.get(k):
-                    notes_lines.append(f"- **{k}:** {notable[k]}")
         except (ValueError, TypeError):
-            pass
+            notable = {}
+
+    # --- Notes section (game-context items only) ---
+    notes_lines: list[str] = []
+    for k in NOTES_SECTION_KEYS:
+        if notable.get(k):
+            notes_lines.append(f"- **{k}:** {notable[k]}")
+    if g.get("umpires") and g["umpires"] != "—":
+        notes_lines.append(f"- **Umpires:** {g['umpires']}")
+    if g.get("first_pitch") and g["first_pitch"] != "—":
+        notes_lines.append(f"- **First pitch:** {g['first_pitch']}")
+    if g.get("attendance") and g["attendance"] != "—":
+        notes_lines.append(f"- **Attendance:** {g['attendance']}")
+    if g.get("duration") and g["duration"] != "—":
+        notes_lines.append(f"- **Duration:** {g['duration']}")
+    if g.get("weather") and g["weather"] != "—":
+        notes_lines.append(f"- **Weather:** {g['weather']}")
+    if g.get("wind"):
+        notes_lines.append(f"- **Wind:** {g['wind']}")
+    if g.get("away_record") or g.get("home_record"):
+        notes_lines.append(
+            f"- **Records:** {away_short} {g.get('away_record','')} · {home_short} {g.get('home_record','')}"
+        )
+
+    # --- Batting notes (per team, below each batting table) ---
+    def _batting_notes(team_short: str) -> str:
+        opp_short = home_short if team_short == away_short else away_short
+        team_half = "top" if team_short == away_short else "bottom"
+        # Filter plays by the batting team (half inning).
+        tplays = [p for p in plays if p.get("half") == team_half]
+
+        def _names_for(event_name: str) -> list[str]:
+            return [last_name(p["batter"]) for p in tplays if p.get("event") == event_name]
+
+        def _names_for_any(events: list[str]) -> list[str]:
+            return [last_name(p["batter"]) for p in tplays if p.get("event") in events]
+
+        doubles = _names_for("Double")
+        triples = _names_for("Triple")
+        # HR: also cite the opposing pitcher, with season-HR in parens.
+        hr_entries: list[str] = []
+        for p in tplays:
+            if p.get("event") != "Home Run":
+                continue
+            batter = last_name(p["batter"])
+            pitcher = last_name(p["pitcher"])
+            bid = p.get("batter_id")
+            season_hr = batter_season_hr.get(int(bid)) if bid not in (None, "") else None
+            season_tag = f" ({season_hr}" if season_hr not in (None, "") else " ("
+            # "(3, off Waldron)" — if no season HR, drop the leading number.
+            inner = (f"{season_hr}, off {pitcher}" if season_hr not in (None, "") else f"off {pitcher}")
+            hr_entries.append(f"{batter} ({inner})")
+
+        # HBP is on the batting team's row (batter is the hit batter).
+        hbp_entries: list[str] = []
+        for p in tplays:
+            if p.get("event") == "Hit By Pitch":
+                hbp_entries.append(f"{last_name(p['batter'])} (by {last_name(p['pitcher'])})")
+
+        gidp = _names_for("Grounded Into DP") + _names_for("GIDP")
+        sh = _names_for_any(["Sac Bunt", "Sacrifice Bunt DP"])
+        sf = _names_for_any(["Sac Fly", "Sac Fly Double Play"])
+
+        # SB/CS come from team-aggregate stats tucked in notable_events_json.
+        # NOTE: LOB is deliberately omitted. MLB's teamStats.batting.leftOnBase
+        # is a cumulative counter (sum across innings), not the scorebook's
+        # "runners stranded" figure. Rendering the raw API value gives wrong
+        # numbers (e.g. 19 instead of ~7), and the skill's hard rule is
+        # "facts are gospel" — a wrong LOB poisons the keepsake. Reinstate
+        # when we reconstruct proper LOB from the per-play runner states.
+        tbs = (notable.get("_team_bat_stats") or {}).get(team_short, {}) if isinstance(notable, dict) else {}
+        sb_ct = tbs.get("sb", "")
+        cs_ct = tbs.get("cs", "")
+
+        def _fmt(lst: list[str]) -> str:
+            return "; ".join(lst) if lst else "\u2014"
+
+        bat_line = (
+            f"2B: {_fmt(doubles)}. "
+            f"3B: {_fmt(triples)}. "
+            f"HR: {_fmt(hr_entries)}. "
+            f"\u00b7 SB: {sb_ct if sb_ct not in (None,'','0',0) else '\u2014'}. "
+            f"CS: {cs_ct if cs_ct not in (None,'','0',0) else '\u2014'}. "
+            f"SH: {_fmt(sh)}. "
+            f"SF: {_fmt(sf)}. "
+            f"HBP: {_fmt(hbp_entries)} "
+            f"\u00b7 GIDP: {_fmt(gidp)}."
+        )
+        return f"**Batting notes** — {bat_line}"
+
+    # --- Pitching notes (per team, below each pitching table) ---
+    def _pitching_notes(team_short: str) -> str:
+        # Pitchers on this team threw while the OTHER team batted, so filter plays accordingly.
+        opp_half = "bottom" if team_short == away_short else "top"
+        tplays = [p for p in plays if p.get("half") == opp_half]
+
+        # WP / PB / Balk / IBB / Pickoffs come from the notable blob (strings keyed by pitcher/catcher name).
+        def _nb(key: str) -> str:
+            v = notable.get(key) if isinstance(notable, dict) else None
+            return v if v else "\u2014"
+
+        # Pitches-strikes / Batters faced / Inherited runners-scored are whole-game strings
+        # in the notable blob — filter to pitchers on this team.
+        # MLB feed uses last-name-first form "Morgan, D 38-22" so entries are ONLY
+        # split on semicolons (the commas inside names would break a naive split).
+        team_pitcher_lasts = {last_name(p["name"]) for p in pitching if p.get("team") == team_short}
+
+        def _filter_pitcher_list(raw: str) -> str:
+            if not raw:
+                return "\u2014"
+            entries = [e.strip() for e in str(raw).split(";") if e.strip()]
+            kept = [e for e in entries
+                    if any(e.startswith(last) for last in team_pitcher_lasts)]
+            return "; ".join(kept) if kept else "\u2014"
+
+        pitches_strikes = _filter_pitcher_list(notable.get("Pitches-strikes", "") if isinstance(notable, dict) else "")
+        inh = _filter_pitcher_list(notable.get("Inherited runners-scored", "") if isinstance(notable, dict) else "")
+        bf = _filter_pitcher_list(notable.get("Batters faced", "") if isinstance(notable, dict) else "")
+
+        # WP / PB / Balk / IBB / Pickoffs — show only names matching this team's pitchers (catchers for PB).
+        def _names_matching(raw: str, name_pool: list[str]) -> str:
+            if not raw:
+                return "\u2014"
+            entries = [e.strip() for e in str(raw).split(";") if e.strip()]
+            kept = [e for e in entries if any(e.startswith(n) for n in name_pool)]
+            return "; ".join(kept) if kept else "\u2014"
+
+        pool = list(team_pitcher_lasts)
+        wp_line = _names_matching(notable.get("WP", "") if isinstance(notable, dict) else "", pool)
+        balk_line = _names_matching(notable.get("Balk", "") if isinstance(notable, dict) else "", pool)
+        ibb_line = _names_matching(notable.get("IBB", "") if isinstance(notable, dict) else "", pool)
+        pko_line = _names_matching(notable.get("Pickoffs", "") if isinstance(notable, dict) else "", pool)
+        # PB is attributed to the catcher — we don't have per-team catcher lists handy; show raw if present.
+        pb_line = _nb("PB") if notable.get("PB") else "\u2014"
+
+        head = (
+            f"**Pitching notes** — WP: {wp_line}. PB: {pb_line}. Balk: {balk_line}. "
+            f"IBB: {ibb_line}. Pickoffs: {pko_line}."
+        )
+        tail_bits = []
+        if pitches_strikes != "\u2014":
+            tail_bits.append(f"Pitches-strikes: {pitches_strikes}")
+        if inh != "\u2014":
+            tail_bits.append(f"Inherited runners-scored: {inh}")
+        if bf != "\u2014":
+            tail_bits.append(f"Batters faced: {bf}")
+        if tail_bits:
+            head += " \u00b7 " + ". ".join(tail_bits) + "."
+        return head
 
     # --- Frontmatter ---
     frontmatter = (
@@ -926,10 +1155,6 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 {moment_block}
 
-## HOW IT HAPPENED
-
-{how_it_happened}
-
 ## SCORING
 
 {scoring_block}
@@ -944,9 +1169,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 {bat_table(away_short)}
 
+{_batting_notes(away_short)}
+
 **{home_name}**
 
 {bat_table(home_short)}
+
+{_batting_notes(home_short)}
 
 ## BOX SCORE — PITCHING
 
@@ -954,9 +1183,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 {pit_table(away_short)}
 
+{_pitching_notes(away_short)}
+
 **{home_name}**
 
 {pit_table(home_short)}
+
+{_pitching_notes(home_short)}
 
 ## NOTES
 
@@ -1013,7 +1246,12 @@ def render_html(md_path: Path, body_class: str = ""):
     )
     html = re.sub(r'<h1 class="title">[^<]*</h1>\s*', "", html, count=1)
     style_block = f"<style>\n{css}\n</style>"
-    html = html.replace("</head>", f"{style_block}\n</head>", 1)
+    # Site nav is injected by /nav.js on the hosted site (see mlb-games/nav.js).
+    # The file is served from the site root, so an absolute /nav.js path works
+    # when deployed; when viewing the HTML locally the script 404s harmlessly
+    # and the page renders without the nav bar.
+    nav_script = '<script src="/nav.js" defer></script>'
+    html = html.replace("</head>", f"{style_block}\n{nav_script}\n</head>", 1)
     if body_class:
         html = html.replace("<body>", f'<body class="{body_class}">', 1)
     html_path.write_text(html)

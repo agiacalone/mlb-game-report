@@ -81,6 +81,31 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
 
     info_items = {i.get("label"): i.get("value", "") for i in box.get("info", [])}
     notable = {k: strip_period(info_items[k]) for k in NOTABLE_KEYS if info_items.get(k)}
+    # Also capture the dense box-score lines if present (verbatim, minus period).
+    for extra in ("Pitches-strikes", "Batters faced", "Inherited runners-scored",
+                  "Groundouts-flyouts", "Pickoffs", "Passed Ball"):
+        if info_items.get(extra):
+            notable[extra] = strip_period(info_items[extra])
+
+    # Per-team aggregate stats for "Batting notes" (LOB, RISP, SB, CS).
+    team_bat_stats: dict[str, dict] = {}
+    for side_key, team_short in (("away", away_short), ("home", home_short)):
+        ts = (box["teams"][side_key].get("teamStats") or {}).get("batting") or {}
+        team_bat_stats[team_short] = {
+            "lob": ts.get("leftOnBase", ""),
+            "sb": ts.get("stolenBases", ""),
+            "cs": ts.get("caughtStealing", ""),
+            "sf": ts.get("sacFlies", ""),
+            "sh": ts.get("sacBunts", ""),
+            "risp_h": ts.get("atBatsWithRunnersInScoringPosition", ""),
+        }
+        # Runners-in-scoring-position: MLB exposes "atBatsWithRunnersInScoringPosition" (AB count)
+        # and hits via seasonStats normally; the game-level RISP "X for Y" lives in the info blob.
+    notable["_team_bat_stats"] = team_bat_stats
+    # RISP "X for Y" per side from the info blob if provided (key "Runners left in scoring position" variant).
+    for k in ("Runners left in scoring position, 2 out", "Team RISP",):
+        if info_items.get(k):
+            notable[k] = strip_period(info_items[k])
 
     venue_data = feed.get("gameData", {}).get("venue", {}) or {}
     loc = venue_data.get("location", {}) or {}
@@ -112,7 +137,7 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         is_scoring = bool(about.get("isScoringPlay")) or (idx in scoring_idx_set)
         tag = EVENT_TAG.get(event, "")
         if event == "Strikeout" and "called" in desc.lower():
-            tag = "Kc"
+            tag = "\ua4d8"  # ꓘ — traditional backward-K for called strikeout
 
         ci = int(about.get("captivatingIndex") or 0)
         if ci > captivating_ci:
