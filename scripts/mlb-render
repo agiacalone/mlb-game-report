@@ -62,7 +62,7 @@ def main() -> None:
         if html_path:
             print(f"Rendered {html_path}", file=sys.stderr)
 
-    if not args.no_index and out_path.parent == LIBRARY:
+    if not args.no_index and out_path.parent.resolve() == LIBRARY.resolve():
         rebuild_index(LIBRARY)
         print(f"Updated {LIBRARY / 'INDEX.md'}", file=sys.stderr)
 

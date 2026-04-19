@@ -163,6 +163,10 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
             "is_scoring_play": is_scoring,
             "captivating_index": ci,
             "rbi": result.get("rbi", 0),
+            # Per-play wall-clock timestamps (ISO 8601 UTC from the feed).
+            # Local conversion can be done at render time via game.csv.tz.
+            "start_time_utc": about.get("startTime", "") or "",
+            "end_time_utc": about.get("endTime", "") or "",
         })
 
         # Pitch rows — one per pitch event. Hit data is attached to whichever
@@ -194,6 +198,31 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
 
     # Also capture hit events that aren't on a pitch (rare; mostly covered above).
 
+    # --- Win probability (separate endpoint; keyed by atBatIndex) ---
+    # Some historical / in-progress games may lack this; swallow errors so
+    # the rest of the dataset still writes.
+    try:
+        wp_data = fetch_json(f"{API}/game/{game_pk}/winProbability")
+    except Exception:
+        wp_data = []
+    wp_by_idx: dict[int, dict] = {}
+    for w in wp_data or []:
+        ab = w.get("atBatIndex")
+        if ab is None:
+            continue
+        wp_by_idx[int(ab)] = {
+            "wp_home": w.get("homeTeamWinProbability", ""),
+            "wp_away": w.get("awayTeamWinProbability", ""),
+            "wpa_home": w.get("homeTeamWinProbabilityAdded", ""),
+            "leverage_index": w.get("leverageIndex", ""),
+        }
+    for row in plays_rows:
+        extra = wp_by_idx.get(int(row["idx"]), {})
+        row["wp_home"] = extra.get("wp_home", "")
+        row["wp_away"] = extra.get("wp_away", "")
+        row["wpa_home"] = extra.get("wpa_home", "")
+        row["leverage_index"] = extra.get("leverage_index", "")
+
     # --- Linescore ---
     innings = line.get("innings", []) or []
     line_rows = [
@@ -221,8 +250,7 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
     pitching_rows: list[dict] = []
     for side_key, team_short in (("away", away_short), ("home", home_short)):
         side = box["teams"][side_key]
-        starters = set(side.get("battingOrder", []) or [])
-        for order, pid in enumerate(side.get("batters", []) or [], 1):
+        for order_idx, pid in enumerate(side.get("batters", []) or [], 1):
             p = side["players"].get(f"ID{pid}")
             if not p:
                 continue
@@ -230,9 +258,20 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
             if not s or "atBats" not in s:
                 continue
             season = p.get("seasonStats", {}).get("batting", {}) or {}
+            # Each player has a per-player `battingOrder` like "500" (starter,
+            # batting 5th) or "501" (first sub in slot 5). Starters end in "00".
+            # We derive the display "order" from the hundreds digit so a PH
+            # keeps the slot of the player he replaced.
+            player_bo = str(p.get("battingOrder") or "")
+            if player_bo.isdigit() and len(player_bo) >= 3:
+                slot = int(player_bo[:-2])
+                is_starter = player_bo.endswith("00")
+            else:
+                slot = order_idx
+                is_starter = order_idx <= 9
             batting_rows.append({
                 "team": team_short,
-                "order": order,
+                "order": slot,
                 "name": p["person"]["fullName"],
                 "player_id": pid,
                 "position": p.get("position", {}).get("abbreviation", ""),
@@ -245,7 +284,7 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
                 "hr": s.get("homeRuns", 0),
                 "avg_season": season.get("avg", ""),
                 "hr_season": season.get("homeRuns", ""),
-                "is_starter": pid in starters,
+                "is_starter": is_starter,
             })
         for order, pid in enumerate(side.get("pitchers", []) or [], 1):
             p = side["players"].get(f"ID{pid}")
@@ -278,6 +317,29 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
     away_rec = away.get("leagueRecord", {}) or {}
     home_rec = home.get("leagueRecord", {}) or {}
 
+    # Derive wall-clock first/last play times from the feed's per-play UTC
+    # timestamps, localized via the venue timezone. These are more accurate
+    # than MLB's `duration` field, which can drift by several minutes.
+    first_pitch_local = ""
+    end_time_local = ""
+    if tz_id and all_plays:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        _tz = _ZI(tz_id)
+        def _fmt_local(iso: str) -> str:
+            if not iso:
+                return ""
+            # Feed returns ISO 8601 with trailing 'Z' or offset
+            try:
+                s = iso.replace("Z", "+00:00")
+                return _dt.fromisoformat(s).astimezone(_tz).strftime("%-I:%M %p")
+            except Exception:
+                return ""
+        fp_iso = ((all_plays[0].get("about") or {}).get("startTime", "")) or ""
+        ep_iso = ((all_plays[-1].get("about") or {}).get("endTime", "")) or ""
+        first_pitch_local = _fmt_local(fp_iso)
+        end_time_local = _fmt_local(ep_iso)
+
     game_row = {
         "gamePk": game_pk,
         "date": game["officialDate"],
@@ -293,7 +355,11 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         "azimuth": loc.get("azimuthAngle", ""),
         "tz": tz_id,
         "dayNight": day_night,
-        "first_pitch": strip_period(info_items.get("First pitch", "—")),
+        # Prefer the feed's per-play first/last times (wall-clock truth)
+        # over the box-info "First pitch" and "T" (duration) fields — MLB's
+        # info values can drift by several minutes.
+        "first_pitch": first_pitch_local or strip_period(info_items.get("First pitch", "—")),
+        "end_time": end_time_local,
         "sunrise": "", "sunset": "", "civil_twilight_end": "",
         "duration": strip_period(info_items.get("T", "—")),
         "attendance": strip_period(info_items.get("Att", "—")),

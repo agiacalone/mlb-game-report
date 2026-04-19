@@ -105,6 +105,9 @@ def main() -> None:
 
     dataset_dir = library / slug
     _FETCH.write_dataset(dataset_dir, dataset)
+    # Expose the dataset dir so the renderer can scan for companion
+    # photos/ and videos/ subdirectories.
+    dataset["_dir"] = dataset_dir
 
     md, _ = render_markdown(dataset)
     md_path.write_text(md)

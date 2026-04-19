@@ -23,9 +23,9 @@ html, body {
 }
 
 body {
-  max-width: 42rem;
-  margin: 2.5rem auto 6rem;
-  padding: 0 1.2rem;
+  max-width: 76rem;    /* wide frame so 9-inning line score fits without scroll */
+  margin: 1rem auto 2.5rem;    /* tight top/bottom */
+  padding: 0 0.4rem;           /* slim side gutters */
 }
 
 /* Masthead / headline */
@@ -208,6 +208,93 @@ a:hover {
 body.index h1 { font-size: 2rem; }
 
 /* ============================================================================
+ * MULTI-COLUMN LAYOUT (Baseball-Reference-inspired density)
+ * ---------------------------------------------------------------------------
+ * Pandoc renders raw HTML divs from the Markdown. We wrap adjacent sections
+ * (Takeaways+Atmosphere, Scoring+Line, away+home boxes) in
+ * `<div class="twocol">` with `<section>` children — grid splits them at
+ * wide widths and stacks them back on narrow screens.
+ * ========================================================================== */
+
+.twocol {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.4rem 2rem;
+  margin: 1em 0;
+  align-items: start;
+}
+.twocol > section {
+  min-width: 0;           /* allow text/tables to shrink */
+  overflow-x: auto;       /* safety net for extras games (11+ innings) */
+}
+.twocol > section > h2:first-child { margin-top: 0; }
+.twocol > section > h2 { font-size: 0.85rem; } /* slightly tighter in-column */
+
+/* Line-score cells should fit all 9 innings + R/H/E in the column without
+   scroll. Tighten padding and font so the table lives inside its frame. */
+.twocol > section table {
+  font-size: 0.88em;
+}
+.twocol > section table th,
+.twocol > section table td {
+  padding: 0.2rem 0.3rem;
+}
+
+/* Prevent label cells (team names in line score, player names in box scores)
+   from wrapping onto multiple lines inside the narrower twocol columns. */
+.twocol > section table th:first-child,
+.twocol > section table td:first-child {
+  white-space: nowrap;
+}
+
+/* Side-by-side batting/pitching boxes: tighten padding, allow overflow */
+.twocol.boxes > section table {
+  font-size: 0.82em;
+  table-layout: auto;
+}
+.twocol.boxes > section table th,
+.twocol.boxes > section table td {
+  padding: 0.15rem 0.35rem;
+  white-space: nowrap;
+}
+.twocol.boxes > section table th {
+  font-size: 0.7em;
+}
+
+@media (max-width: 48rem) {
+  /* Narrow screens: stack the columns back to single-file */
+  .twocol { grid-template-columns: 1fr; }
+  .twocol.boxes > section table {
+    font-size: 0.88em;
+    white-space: normal;
+  }
+}
+
+/* Three-column layout — used by the NOTES card (away lineup · home lineup · game notes) */
+.threecol {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.2fr;
+  gap: 1.2rem 1.6rem;
+  margin: 1em 0;
+  align-items: start;
+  font-size: 0.9em;
+  line-height: 1.45;
+}
+.threecol > section { min-width: 0; }
+.threecol > section p { margin: 0.25em 0; }
+.threecol > section ul { margin: 0.2em 0; padding-left: 1.1em; }
+.threecol > section li { margin: 0.12rem 0; }
+.threecol.notes-card {
+  padding: 0.6rem 0.8rem;
+  background: var(--paper);
+  border-left: 3px solid var(--team-primary);
+  border-radius: 2px;
+}
+@media (max-width: 48rem) {
+  .threecol { grid-template-columns: 1fr; }
+}
+
+/* ============================================================================
  * TEAM-AWARE OVERLAY
  * ---------------------------------------------------------------------------
  * Self-contained team palette + overlay rules. Integrated from the former
@@ -222,79 +309,118 @@ body.index h1 { font-size: 2rem; }
 :root {
   --team-primary:   var(--accent);   /* h1/h2 color + hr + link color */
   --team-secondary: var(--ink);      /* h3 color */
+  --team-fg:        #fff;            /* text on team-primary backgrounds */
   --tint:           #f3ede0;
   --zebra:          #f6f2e7;
   --hover:          #ecd6b8;
+
+  /* --- Team color palette (one source of truth) --- */
+  --color-ARI: #A71930;  --color-AZ:  #A71930;
+  --color-ATL: #CE1141;
+  --color-BAL: #DF4601;
+  --color-BOS: #BD3039;
+  --color-CHC: #0E3386;
+  --color-CWS: #27251F;
+  --color-CIN: #C6011F;
+  --color-CLE: #00385D;
+  --color-COL: #333366;
+  --color-DET: #0C2340;
+  --color-HOU: #EB6E1F;
+  --color-KC:  #004687;
+  --color-LAA: #BA0021;
+  --color-LAD: #005A9C;
+  --color-MIA: #00A3E0;
+  --color-MIL: #12284B;
+  --color-MIN: #002B5C;
+  --color-NYM: #FF5910;
+  --color-NYY: #0C2340;
+  --color-OAK: #003831;  --color-ATH: #003831;
+  --color-PHI: #E81828;
+  --color-PIT: #FDB827;
+  --color-SD:  #2F241D;
+  --color-SF:  #FD5A1E;
+  --color-SEA: #0C2C56;
+  --color-STL: #C41E3A;
+  --color-TB:  #092C5C;
+  --color-TEX: #003278;
+  --color-TOR: #134A8E;
+  --color-WSH: #AB0003;
 }
 
-/* --- Away-team palettes (set --team-secondary) --- */
-body.away-ARI, body.away-AZ  { --team-secondary: #A71930; }
-body.away-ATL { --team-secondary: #CE1141; }
-body.away-BAL { --team-secondary: #DF4601; }
-body.away-BOS { --team-secondary: #BD3039; }
-body.away-CHC { --team-secondary: #0E3386; }
-body.away-CWS { --team-secondary: #27251F; }
-body.away-CIN { --team-secondary: #C6011F; }
-body.away-CLE { --team-secondary: #00385D; }
-body.away-COL { --team-secondary: #333366; }
-body.away-DET { --team-secondary: #0C2340; }
-body.away-HOU { --team-secondary: #EB6E1F; }
-body.away-KC  { --team-secondary: #004687; }
-body.away-LAA { --team-secondary: #BA0021; }
-body.away-LAD { --team-secondary: #005A9C; }
-body.away-MIA { --team-secondary: #00A3E0; }
-body.away-MIL { --team-secondary: #12284B; }
-body.away-MIN { --team-secondary: #002B5C; }
-body.away-NYM { --team-secondary: #FF5910; }
-body.away-NYY { --team-secondary: #0C2340; }
-body.away-OAK, body.away-ATH { --team-secondary: #003831; }
-body.away-PHI { --team-secondary: #E81828; }
-body.away-PIT { --team-secondary: #FDB827; }
-body.away-SD  { --team-secondary: #2F241D; }
-body.away-SF  { --team-secondary: #FD5A1E; }
-body.away-SEA { --team-secondary: #0C2C56; }
-body.away-STL { --team-secondary: #C41E3A; }
-body.away-TB  { --team-secondary: #092C5C; }
-body.away-TEX { --team-secondary: #003278; }
-body.away-TOR { --team-secondary: #134A8E; }
-body.away-WSH { --team-secondary: #AB0003; }
+/* --- Page-level home palette + per-section team class.
+ * `body.home-XXX` paints the whole page with that team's primary.
+ * `section.team-XXX` lets each box-score container paint its own team color
+ * (so the away batting/pitching boxes show in the AWAY team's color and the
+ * home boxes in the HOME team's color). `.team-badge.team-XXX` is the pill. */
+body.home-ARI, body.home-AZ, section.team-ARI, section.team-AZ, .team-badge.team-ARI, .team-badge.team-AZ { --team-primary: var(--color-ARI); --team-fg: #fff; }
+body.home-ATL, section.team-ATL, .team-badge.team-ATL { --team-primary: var(--color-ATL); --team-fg: #fff; }
+body.home-BAL, section.team-BAL, .team-badge.team-BAL { --team-primary: var(--color-BAL); --team-fg: #fff; }
+body.home-BOS, section.team-BOS, .team-badge.team-BOS { --team-primary: var(--color-BOS); --team-fg: #fff; }
+body.home-CHC, section.team-CHC, .team-badge.team-CHC { --team-primary: var(--color-CHC); --team-fg: #fff; }
+body.home-CWS, section.team-CWS, .team-badge.team-CWS { --team-primary: var(--color-CWS); --team-fg: #fff; }
+body.home-CIN, section.team-CIN, .team-badge.team-CIN { --team-primary: var(--color-CIN); --team-fg: #fff; }
+body.home-CLE, section.team-CLE, .team-badge.team-CLE { --team-primary: var(--color-CLE); --team-fg: #fff; }
+body.home-COL, section.team-COL, .team-badge.team-COL { --team-primary: var(--color-COL); --team-fg: #fff; }
+body.home-DET, section.team-DET, .team-badge.team-DET { --team-primary: var(--color-DET); --team-fg: #fff; }
+body.home-HOU, section.team-HOU, .team-badge.team-HOU { --team-primary: var(--color-HOU); --team-fg: #fff; }
+body.home-KC,  section.team-KC,  .team-badge.team-KC  { --team-primary: var(--color-KC);  --team-fg: #fff; }
+body.home-LAA, section.team-LAA, .team-badge.team-LAA { --team-primary: var(--color-LAA); --team-fg: #fff; }
+body.home-LAD, section.team-LAD, .team-badge.team-LAD { --team-primary: var(--color-LAD); --team-fg: #fff; }
+body.home-MIA, section.team-MIA, .team-badge.team-MIA { --team-primary: var(--color-MIA); --team-fg: #fff; }
+body.home-MIL, section.team-MIL, .team-badge.team-MIL { --team-primary: var(--color-MIL); --team-fg: #fff; }
+body.home-MIN, section.team-MIN, .team-badge.team-MIN { --team-primary: var(--color-MIN); --team-fg: #fff; }
+body.home-NYM, section.team-NYM, .team-badge.team-NYM { --team-primary: var(--color-NYM); --team-fg: #fff; }
+body.home-NYY, section.team-NYY, .team-badge.team-NYY { --team-primary: var(--color-NYY); --team-fg: #fff; }
+body.home-OAK, body.home-ATH, section.team-OAK, section.team-ATH, .team-badge.team-OAK, .team-badge.team-ATH { --team-primary: var(--color-OAK); --team-fg: #fff; }
+body.home-PHI, section.team-PHI, .team-badge.team-PHI { --team-primary: var(--color-PHI); --team-fg: #fff; }
+/* PIT's primary is yellow — needs dark foreground for readability. */
+body.home-PIT, section.team-PIT, .team-badge.team-PIT { --team-primary: var(--color-PIT); --team-fg: #1a1a1a; }
+body.home-SD,  section.team-SD,  .team-badge.team-SD  { --team-primary: var(--color-SD);  --team-fg: #fff; }
+body.home-SF,  section.team-SF,  .team-badge.team-SF  { --team-primary: var(--color-SF);  --team-fg: #fff; }
+body.home-SEA, section.team-SEA, .team-badge.team-SEA { --team-primary: var(--color-SEA); --team-fg: #fff; }
+body.home-STL, section.team-STL, .team-badge.team-STL { --team-primary: var(--color-STL); --team-fg: #fff; }
+body.home-TB,  section.team-TB,  .team-badge.team-TB  { --team-primary: var(--color-TB);  --team-fg: #fff; }
+body.home-TEX, section.team-TEX, .team-badge.team-TEX { --team-primary: var(--color-TEX); --team-fg: #fff; }
+body.home-TOR, section.team-TOR, .team-badge.team-TOR { --team-primary: var(--color-TOR); --team-fg: #fff; }
+body.home-WSH, section.team-WSH, .team-badge.team-WSH { --team-primary: var(--color-WSH); --team-fg: #fff; }
 
-/* --- Home-team palettes (set --team-primary, wins visual priority) --- */
-body.home-ARI, body.home-AZ  { --team-primary: #A71930; }
-body.home-ATL { --team-primary: #CE1141; }
-body.home-BAL { --team-primary: #DF4601; }
-body.home-BOS { --team-primary: #BD3039; }
-body.home-CHC { --team-primary: #0E3386; }
-body.home-CWS { --team-primary: #27251F; }
-body.home-CIN { --team-primary: #C6011F; }
-body.home-CLE { --team-primary: #00385D; }
-body.home-COL { --team-primary: #333366; }
-body.home-DET { --team-primary: #0C2340; }
-body.home-HOU { --team-primary: #EB6E1F; }
-body.home-KC  { --team-primary: #004687; }
-body.home-LAA { --team-primary: #BA0021; }
-body.home-LAD { --team-primary: #005A9C; }
-body.home-MIA { --team-primary: #00A3E0; }
-body.home-MIL { --team-primary: #12284B; }
-body.home-MIN { --team-primary: #002B5C; }
-body.home-NYM { --team-primary: #FF5910; }
-body.home-NYY { --team-primary: #0C2340; }
-body.home-OAK, body.home-ATH { --team-primary: #003831; }
-body.home-PHI { --team-primary: #E81828; }
-body.home-PIT { --team-primary: #FDB827; }
-body.home-SD  { --team-primary: #2F241D; }
-body.home-SF  { --team-primary: #FD5A1E; }
-body.home-SEA { --team-primary: #0C2C56; }
-body.home-STL { --team-primary: #C41E3A; }
-body.home-TB  { --team-primary: #092C5C; }
-body.home-TEX { --team-primary: #003278; }
-body.home-TOR { --team-primary: #134A8E; }
-body.home-WSH { --team-primary: #AB0003; }
+/* --- Away-team palettes (set --team-secondary for subhead / h3 tint) --- */
+body.away-ARI, body.away-AZ  { --team-secondary: var(--color-ARI); }
+body.away-ATL { --team-secondary: var(--color-ATL); }
+body.away-BAL { --team-secondary: var(--color-BAL); }
+body.away-BOS { --team-secondary: var(--color-BOS); }
+body.away-CHC { --team-secondary: var(--color-CHC); }
+body.away-CWS { --team-secondary: var(--color-CWS); }
+body.away-CIN { --team-secondary: var(--color-CIN); }
+body.away-CLE { --team-secondary: var(--color-CLE); }
+body.away-COL { --team-secondary: var(--color-COL); }
+body.away-DET { --team-secondary: var(--color-DET); }
+body.away-HOU { --team-secondary: var(--color-HOU); }
+body.away-KC  { --team-secondary: var(--color-KC); }
+body.away-LAA { --team-secondary: var(--color-LAA); }
+body.away-LAD { --team-secondary: var(--color-LAD); }
+body.away-MIA { --team-secondary: var(--color-MIA); }
+body.away-MIL { --team-secondary: var(--color-MIL); }
+body.away-MIN { --team-secondary: var(--color-MIN); }
+body.away-NYM { --team-secondary: var(--color-NYM); }
+body.away-NYY { --team-secondary: var(--color-NYY); }
+body.away-OAK, body.away-ATH { --team-secondary: var(--color-OAK); }
+body.away-PHI { --team-secondary: var(--color-PHI); }
+body.away-PIT { --team-secondary: var(--color-PIT); }
+body.away-SD  { --team-secondary: var(--color-SD); }
+body.away-SF  { --team-secondary: var(--color-SF); }
+body.away-SEA { --team-secondary: var(--color-SEA); }
+body.away-STL { --team-secondary: var(--color-STL); }
+body.away-TB  { --team-secondary: var(--color-TB); }
+body.away-TEX { --team-secondary: var(--color-TEX); }
+body.away-TOR { --team-secondary: var(--color-TOR); }
+body.away-WSH { --team-secondary: var(--color-WSH); }
 
 /* INDEX and other non-game pages wear the site's home-team colors (SF Giants). */
 body.index, body.fun {
-  --team-primary:   #FD5A1E;
-  --team-secondary: #27251F;
+  --team-primary:   var(--color-SF);
+  --team-secondary: var(--color-CWS);
+  --team-fg:        #fff;
 }
 
 /* --- Headings pick up the active palette --- */
@@ -328,7 +454,7 @@ body table {
 }
 body table th {
   background: var(--team-primary);
-  color: #fff;
+  color: var(--team-fg, #fff);
   font-variant: small-caps;
   letter-spacing: 0.04em;
   padding: 0.35rem 0.55rem;
@@ -365,12 +491,202 @@ body hr {
 body ul li { margin: 0.12rem 0; }
 
 /* ============================================================================
+ * SCOREBOOK TAGS — traffic-light outcomes in PBP
+ * ---------------------------------------------------------------------------
+ * Each plate-appearance leads with a compact colored tag (HR/1B/BB/K/GO/…).
+ * Color categories map to baseball meaning so the eye parses outcome by hue:
+ *   gold  — home runs (marquee)
+ *   green — hits (1B/2B/3B)
+ *   yellow — on base without hit (BB/IBB/HBP) + sacrifices
+ *   red   — strikeouts and errors
+ *   dark red — double/triple plays
+ *   gray  — routine outs
+ * ========================================================================== */
+.sb-tag {
+  display: inline-block;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0 0.35em;
+  border-radius: 0.2rem;
+  vertical-align: baseline;
+  background: #eae3d0;
+  color: #4a3d24;
+  margin-right: 0.3em;
+  min-width: 2.2em;
+  text-align: center;
+}
+.sb-hr   { background: #d4a017; color: #1a1106; }              /* gold */
+.sb-hit  { background: #1a7a3a; color: #fff; }                 /* green: 1B/2B/3B */
+.sb-walk { background: #c49c2b; color: #1a1106; }              /* mustard: BB/IBB/HBP */
+.sb-sac  { background: #8a7420; color: #fff; }                 /* amber: SF/SH */
+.sb-k    { background: #8a2626; color: #fff; }                 /* red: K/ꓘ */
+.sb-err  { background: #8a2626; color: #fff; }                 /* red: E */
+.sb-dp   { background: #5a1a1a; color: #fff; }                 /* dark red: GIDP/DP/TP */
+.sb-out  { background: #8a8371; color: #fff; }                 /* gray: routine outs */
+.sb-fc   { background: #8a8371; color: #fff; }                 /* gray: fielder's choice */
+.sb-ci   { background: #8a7a20; color: #fff; }                 /* umber: interference */
+
+/* Position pills — compact neutral tags for baseball positions (HP/1B/2B/SS/LF/CF/…).
+   Same shape as team badges but team-agnostic gray so they read as labels. */
+.pos-tag {
+  display: inline-block;
+  padding: 0.1em 0.4em;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border-radius: 0.2rem;
+  background: #e5dfd0;
+  color: #4a3d24;
+  vertical-align: baseline;
+  margin: 0 0.08em;
+}
+@media (prefers-color-scheme: dark) {
+  .pos-tag { background: #3a342a; color: #d0c9b7; }
+}
+
+/* Dim zero stats in box scores so the non-zero cells pop */
+.dim { color: #b5ab94; font-weight: 400; }
+@media (prefers-color-scheme: dark) {
+  .dim { color: #55503e; }
+}
+
+@media (prefers-color-scheme: dark) {
+  .sb-tag  { background: #3a342a; color: #d0c9b7; }
+  .sb-hr   { background: #d4a017; color: #1a1106; }
+  .sb-hit  { background: #2a9050; color: #fff; }
+  .sb-walk { background: #b58a2b; color: #1a1106; }
+  .sb-sac  { background: #8a7420; color: #fff; }
+  .sb-k    { background: #aa3a3a; color: #fff; }
+  .sb-err  { background: #aa3a3a; color: #fff; }
+  .sb-dp   { background: #6a1a1a; color: #fff; }
+  .sb-out  { background: #5a5040; color: #e8e2d0; }
+  .sb-fc   { background: #5a5040; color: #e8e2d0; }
+}
+
+/* Scoring-play PBP items — subtle left-accent hint. Not too heavy; the ⚾/·
+   glyph already flags the play, this just nudges the eye. */
+.pbp-scoring {
+  padding-left: 0.4em;
+  border-left: 3px solid var(--team-primary, #7a1717);
+  background: rgba(122, 23, 23, 0.04);
+}
+
+/* ============================================================================
+ * TEAM BADGE PILLS
+ * ---------------------------------------------------------------------------
+ * Lightweight monochrome pill showing a team's 3-letter abbreviation in its
+ * own color. Used next to team names in box-score headers and AT-A-GLANCE.
+ * Background + foreground resolved from the team class (e.g. .team-LAA).
+ * ========================================================================== */
+.team-badge {
+  display: inline-block;
+  padding: 0.12em 0.55em;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.72em;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  vertical-align: baseline;
+  border-radius: 0.25rem;
+  background: var(--team-primary, #7a1717);
+  color: var(--team-fg, #fff);
+  text-transform: uppercase;
+  line-height: 1.4;
+}
+a .team-badge { border: none; }
+
+/* ============================================================================
+ * EXTERNAL REFERENCES — small "Also at:" row for BR / Stathead / FanGraphs
+ * Subtle links beneath the subhead that deep-link to the user's paid research
+ * tools' per-game views via each site's standard URL pattern.
+ * ========================================================================== */
+.external-refs {
+  text-align: right;
+  font-size: 0.78em;
+  color: var(--muted);
+  margin: 0.2em 0 1.2em;
+  letter-spacing: 0.02em;
+}
+.external-refs a {
+  color: var(--muted);
+  border-bottom: 1px dotted transparent;
+}
+.external-refs a:hover {
+  color: var(--team-primary);
+  border-bottom-color: var(--team-primary);
+}
+
+/* ============================================================================
+ * AT A GLANCE — compact symbol-driven banner (not a 2-column label table)
+ * ========================================================================== */
+.glance {
+  margin: 1em 0 1.4em;
+  padding: 0.7rem 1rem;
+  background: var(--tint);
+  border-left: 4px solid var(--team-primary);
+  border-radius: 2px;
+  font-size: 0.95em;
+  line-height: 1.6;
+}
+.glance p { margin: 0.2em 0; }
+.glance .score {
+  font-size: 1.15em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.glance .score .team-badge {
+  font-size: 0.78em;
+  margin: 0 0.35em;
+}
+
+/* ============================================================================
+ * DARK MODE — flat, warm charcoal paper tone with preserved team accents
+ * ========================================================================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink:        #e8e2d0;   /* warm off-white */
+    --paper:      #151310;   /* warm charcoal */
+    --paper-alt:  #1e1a14;
+    --rule:       #5a5142;
+    --muted:      #988d72;
+    --accent:     #d95444;   /* brighter red for dark bg */
+    --tint:       #2a2418;
+    --zebra:      #1d1a13;
+    --hover:      #3a301f;
+  }
+  body {
+    /* Slightly thinner body text reads better on dark. */
+    -webkit-font-smoothing: antialiased;
+  }
+  body blockquote {
+    background: rgba(122, 23, 23, 0.14);
+    border-radius: 4px;
+  }
+  body table td {
+    border-bottom: 1px solid #2a2418;
+  }
+  .glance {
+    background: var(--paper-alt);
+  }
+  /* Dark-mode box-scrolling chrome for side-by-side boxes */
+  .twocol.boxes > section table {
+    background: var(--paper-alt);
+  }
+  /* Horizontal rule is subtler on dark */
+  body hr { opacity: 0.35; }
+  /* Index-page "§ § §" glyphs dim */
+  hr::before { color: #554a38; }
+}
+
+/* ============================================================================
  * SITE NAV (injected by /nav.js on the hosted site; rules here wait for it)
  * ========================================================================== */
 nav.site-nav {
   background: var(--team-primary);
   color: #fff;
-  margin: -2.5rem -1.2rem 2rem;
+  margin: -1rem -0.4rem 2rem;
   padding: 0.6rem 1.2rem;
   box-shadow: 0 2px 0 rgba(0,0,0,0.08);
   font-family: Georgia, "Times New Roman", serif;
@@ -424,7 +740,77 @@ nav.site-nav ul.site-nav-links a[aria-current="page"] {
 }
 
 @media (max-width: 36rem) {
-  nav.site-nav { margin: -2.5rem -0.6rem 1.2rem; padding: 0.5rem 0.8rem; }
+  nav.site-nav { margin: -1rem -0.4rem 1.2rem; padding: 0.5rem 0.8rem; }
   nav.site-nav .site-nav-brand { font-size: 0.85rem; }
   nav.site-nav ul.site-nav-links { gap: 0.8rem; font-size: 0.8rem; }
+}
+
+/* Scoring-table leading glyph — fixed-width column so ⚾ and · align. */
+.sc-glyph {
+  display: inline-block;
+  width: 1.1em;
+  text-align: center;
+  margin-right: 0.1em;
+}
+
+/* Win Probability chart + Top 5 Plays */
+.wp-chart-wrap {
+  margin: 0.5rem 0 1rem;
+  overflow-x: auto;
+}
+svg.wp-chart {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  display: block;
+}
+svg.wp-chart .wp-bg { fill: #ececec; }
+svg.wp-chart .wp-area { fill: rgba(120,120,120,0.32); }
+svg.wp-chart .wp-line { fill: none; stroke: #b21f24; stroke-width: 1.4; stroke-linejoin: miter; }
+svg.wp-chart .wp-mid  { stroke: rgba(0,0,0,0.25); stroke-width: 1; stroke-dasharray: 3 3; }
+svg.wp-chart .wp-tick { stroke: rgba(0,0,0,0.12); stroke-width: 1; }
+svg.wp-chart .wp-tick-lbl {
+  fill: rgba(0,0,0,0.55);
+  font: 10px/1 var(--sans, sans-serif);
+  text-anchor: middle;
+}
+svg.wp-chart .wp-axis {
+  fill: rgba(0,0,0,0.65);
+  font: 10px/1 var(--sans, sans-serif);
+  text-anchor: end;
+  font-weight: 700;
+}
+@media (prefers-color-scheme: dark) {
+  svg.wp-chart .wp-bg { fill: rgba(255,255,255,0.06); }
+  svg.wp-chart .wp-line { stroke: #ff6a6f; }
+  svg.wp-chart .wp-mid { stroke: rgba(255,255,255,0.25); }
+  svg.wp-chart .wp-tick { stroke: rgba(255,255,255,0.12); }
+  svg.wp-chart .wp-tick-lbl { fill: rgba(255,255,255,0.55); }
+  svg.wp-chart .wp-axis { fill: rgba(255,255,255,0.8); }
+}
+
+/* Decisions list + team records — sit under the line score in the LINE SCORE column */
+ul.decisions {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0.6rem;
+  font-size: 0.88em;
+  line-height: 1.6;
+}
+ul.decisions li {
+  margin: 0.1rem 0;
+}
+ul.decisions .dec-tag {
+  margin-right: 0.35em;
+  font-size: 0.78em;
+}
+p.records {
+  margin: 0.3rem 0 0;
+  font-size: 0.85em;
+  color: var(--muted);
+  line-height: 1.45;
+}
+p.records strong { color: var(--ink); font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  p.records strong { color: #eee; }
 }

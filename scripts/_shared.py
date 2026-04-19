@@ -13,6 +13,7 @@ import math
 import re
 from datetime import date as _date, datetime
 from pathlib import Path
+from urllib.parse import quote_plus as urllib_quote
 from zoneinfo import ZoneInfo
 
 # --- Constants --------------------------------------------------------------
@@ -28,6 +29,78 @@ ORDINAL_WORD = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
 
 # Statcast fielding position codes (1=P through 9=RF)
 POS = {1: "P", 2: "C", 3: "1B", 4: "2B", 5: "3B", 6: "SS", 7: "LF", 8: "CF", 9: "RF"}
+
+# Scorebook tag → CSS category for traffic-light color in the rendered HTML.
+# (The plain-text tag is preserved for the Markdown; the category is an HTML
+# affordance for visual scanning. CSV analysis tools use the `event_tag`
+# column directly.)
+SB_CATEGORY = {
+    # Outcomes in PBP and batting notes
+    "HR":   "hr",
+    "1B":   "hit",  "2B":  "hit",  "3B":  "hit",
+    "BB":   "walk", "IBB": "walk", "HBP": "walk",
+    "SB":   "hit",  "CS":  "out",
+    "SF":   "sac",  "SH":  "sac",  "SF-DP": "sac", "SH-DP": "sac",
+    "K":    "k",
+    "\ua4d8": "k",  # ꓘ — called strikeout
+    "Kc":   "k",    # legacy, safe
+    "K-DP": "k",
+    "E":    "err",
+    "GIDP": "dp",   "DP":  "dp",  "TP": "dp",
+    "GO":   "out",  "FO":  "out", "LO": "out", "PO": "out",
+    "FC":   "fc",
+    "CI":   "ci",   "BI":  "ci", "FI": "ci",
+    # Pitching-notes label pills
+    "WP":   "err",
+    "PB":   "err",
+    "Balk": "err",
+    "Pickoffs": "out",
+    "Ejections": "dp",
+    "Disengagement violations": "err",
+    "Pitch timer violations": "err",
+    # Pitcher decisions
+    "W":    "hit",   # win — green
+    "L":    "k",     # loss — red
+    "S":    "hr",    # save — gold
+}
+
+
+def pos_tag(pos: str) -> str:
+    """Neutral-color position pill (HP/1B/2B/SS/LF/CF/…). Compact, monospace,
+    team-agnostic — distinguishable from team badges at a glance."""
+    if not pos:
+        return ""
+    return f'<span class="pos-tag">{pos}</span>'
+
+
+def stat_label(name: str) -> str:
+    """Neutral-color pill for stat abbreviations (IP, H, ER, BB, K, RBI, HR, …).
+    Same shape as position pills so labels scan consistently across all blocks."""
+    if not name:
+        return ""
+    return f'<span class="pos-tag">{name}</span>'
+
+
+# Umpire labels we wrap with position pills when they appear at word boundaries.
+_UMPIRE_POS_RE = re.compile(r"\b(HP|1B|2B|3B|LF|RF)\b")
+
+
+def tag_umpires(s: str) -> str:
+    """Wrap the position labels in an umpire string ("HP Muchlinski · 1B Morales · …")
+    with position pills. The names/dots/separators stay as-is."""
+    if not s:
+        return s
+    return _UMPIRE_POS_RE.sub(lambda m: pos_tag(m.group(1)), s)
+
+
+def sb_tag_html(tag: str) -> str:
+    """Render a scorebook tag as a colored pill for HTML. The Markdown still
+    has the bare letters inside the span — it looks the same as inline code
+    in plain-text viewers."""
+    cat = SB_CATEGORY.get(tag, "")
+    cls = f"sb-tag sb-{cat}" if cat else "sb-tag"
+    return f'<span class="{cls}">{tag}</span>'
+
 
 # Scorebook-style tags per plate-appearance outcome.
 EVENT_TAG: dict[str, str] = {
@@ -67,6 +140,39 @@ EVENT_TAG: dict[str, str] = {
 NOTABLE_KEYS = ["WP", "PB", "Balk", "HBP", "IBB", "SB", "CS", "E", "DP",
                 "Disengagement violations", "Pitch timer violations",
                 "Pickoffs", "Ejections"]
+
+# MLB 3-letter abbreviation → Baseball-Reference code. Most match; these are
+# the ones that differ. Used only to construct deep-links to BR boxscores —
+# we do NOT fetch or scrape anything from BR.
+BR_ABBR: dict[str, str] = {
+    "LAA": "ANA",  # Angels in BR are "ANA" (Anaheim)
+    "SD":  "SDP",
+    "SF":  "SFG",
+    "TB":  "TBR",
+    "KC":  "KCR",
+    "WSH": "WSN",
+    "CWS": "CHW",
+    "ATH": "OAK",
+}
+
+
+def br_box_url(home_abbr: str, date_iso: str, game_num: int = 0) -> str:
+    """Build a Baseball-Reference boxscore URL for a game. Format:
+    /boxes/<HOME>/<HOME>YYYYMMDD<gameNum>.shtml"""
+    br = BR_ABBR.get(home_abbr, home_abbr)
+    date_nodash = date_iso.replace("-", "")
+    return f"https://www.baseball-reference.com/boxes/{br}/{br}{date_nodash}{game_num}.shtml"
+
+
+def fangraphs_box_url(date_iso: str, away_short: str) -> str:
+    """FanGraphs per-game boxscore URL. Pattern:
+    https://www.fangraphs.com/boxscore.aspx?date=YYYY-MM-DD&team={AWAY}&dh=0&season=YYYY
+    where {AWAY} is the visiting team's short name (Angels, Padres, Blue Jays, etc.)."""
+    year = date_iso.split("-")[0]
+    return (
+        f"https://www.fangraphs.com/boxscore.aspx?date={date_iso}"
+        f"&team={urllib_quote(away_short)}&dh=0&season={year}"
+    )
 
 # Notable-event keys that belong in the NOTES section (game-context only).
 # Batting/pitching-specific items now render as their own notes blocks near
@@ -190,6 +296,44 @@ def slugify(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 
 
+# Stadium-relative wind directions → compass-like Unicode arrows.
+# MLB's feed reports wind as "{speed} mph, {direction}" where direction is
+# one of: "Out To RF", "Out To LF", "Out To CF", "In From RF", "In From LF",
+# "In From CF", "L To R", "R To L", "Calm", "Varies", "None", etc.
+# Convention: home plate is at the bottom of the field, outfield up top.
+_WIND_ARROWS: list[tuple[str, str]] = [
+    # Order matters — more specific (RF/LF/CF) before "out"/"in" general.
+    ("out to rf", "\u2197"),  # ↗
+    ("out to lf", "\u2196"),  # ↖
+    ("out to cf", "\u2191"),  # ↑
+    ("out to r",  "\u2197"),  # ↗
+    ("out to l",  "\u2196"),  # ↖
+    ("in from rf", "\u2199"), # ↙
+    ("in from lf", "\u2198"), # ↘
+    ("in from cf", "\u2193"), # ↓
+    ("in from r",  "\u2199"), # ↙
+    ("in from l",  "\u2198"), # ↘
+    ("l to r",     "\u2192"), # →
+    ("r to l",     "\u2190"), # ←
+]
+
+
+def wind_arrow(wind: str) -> str:
+    """Return a wind string with the direction replaced by a Unicode arrow.
+    E.g. "9 mph, Out To RF" → "9 mph ↗". Calm/Varies/None get no arrow."""
+    if not wind:
+        return wind
+    low = wind.lower()
+    for needle, arrow in _WIND_ARROWS:
+        if needle in low:
+            # Strip the direction phrase (preserve punctuation/spacing).
+            # Match case-insensitively.
+            pat = re.compile(re.escape(needle), re.IGNORECASE)
+            stripped = pat.sub("", wind).rstrip(" ,").strip()
+            return f"{stripped} {arrow}".strip()
+    return wind  # Calm / Varies / no direction — leave as-is
+
+
 # --- CSV helpers ------------------------------------------------------------
 
 def _cast(v: str):
@@ -227,6 +371,7 @@ GAME_FIELDS = [
     "gamePk", "date", "game_type", "status", "venue", "venue_id", "city", "state",
     "lat", "lon", "elevation", "azimuth", "tz", "dayNight", "first_pitch",
     "sunrise", "sunset", "civil_twilight_end", "duration", "attendance", "weather",
+    "end_time",
     "wind", "umpires", "away_team", "away_team_id", "away_team_short", "away_abbr",
     "home_team", "home_team_id", "home_team_short", "home_abbr",
     "away_score", "home_score",
@@ -245,7 +390,16 @@ PITCHING_FIELDS = ["team", "order", "name", "player_id", "decision",
 PLAY_FIELDS = ["idx", "inning", "half", "batter", "batter_id", "pitcher",
                "pitcher_id", "event", "event_tag", "description", "balls",
                "strikes", "pitch_count", "away_score_after", "home_score_after",
-               "is_scoring_play", "captivating_index", "rbi"]
+               "is_scoring_play", "captivating_index", "rbi",
+               # Per-play wall-clock (ISO 8601 UTC) — for precise broadcast
+               # timestamps without linear approximation.
+               "start_time_utc", "end_time_utc",
+               # Win-probability fields from /winProbability endpoint.
+               # wp_home/wp_away are AFTER this play; wpa_home is the
+               # change contributed by this play for the home side
+               # (negative = play helped away). leverage_index is the
+               # Tom Tango LI at the start of the plate appearance.
+               "wp_home", "wp_away", "wpa_home", "leverage_index"]
 PITCH_FIELDS = ["play_idx", "pitch_num", "type_code", "type_desc", "speed_mph",
                 "spin_rpm", "call", "px", "pz", "ev_mph", "la_deg",
                 "distance_ft", "trajectory", "hit_location", "hardness"]
@@ -273,6 +427,7 @@ def read_dataset(dirpath: Path) -> dict:
         "pitching": read_csv(dirpath / "pitching.csv"),
         "plays": read_csv(dirpath / "plays.csv"),
         "pitches": read_csv(dirpath / "pitches.csv"),
+        "_dir": dirpath,
     }
 
 
@@ -452,6 +607,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     home_name = g["home_team"]
     away_short = g["away_team_short"]
     home_short = g["home_team_short"]
+    away_abbr = g.get("away_abbr") or ""
+    home_abbr = g.get("home_abbr") or ""
+    # Team pill badges used across the document (AT A GLANCE, top performers,
+    # box scores, NOTES lineups). Defined up here so any rendering helper
+    # below can reference them.
+    away_pill = f'<span class="team-badge team-{away_abbr}">{away_abbr}</span>' if away_abbr else away_short
+    home_pill = f'<span class="team-badge team-{home_abbr}">{home_abbr}</span>' if home_abbr else home_short
     away_r = int(g["away_score"] or 0)
     home_r = int(g["home_score"] or 0)
     winner_name = home_name if home_r > away_r else away_name
@@ -465,11 +627,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     lp = g.get("losing_pitcher") or ""
     sv = g.get("save_pitcher") or ""
 
-    # Headline + subhead
+    # Headline + subhead. Use "WINNER N, LOSER M" (AP/newspaper style) instead
+    # of a hyphen score — the hyphen form reads as away–home in baseball and
+    # gives the wrong impression when the home team wins.
     if l_score == 0:
-        headline = f"{winner_short.upper()} BLANK {loser_short.upper()}, {w_score}–0"
+        headline = f"{winner_short.upper()} BLANK {loser_short.upper()}, {l_score}-{w_score}"
     else:
-        headline = f"{winner_short.upper()} TOP {loser_short.upper()}, {w_score}–{l_score}"
+        headline = f"{winner_short.upper()} TOP {loser_short.upper()}, {l_score}-{w_score}"
 
     w_side_short = winner_short
     tops = _top_batters(batting, w_side_short, 1)
@@ -605,24 +769,206 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     takeaways_block = "\n".join(f"- {b}" for b in bullets) if bullets else "_—_"
 
-    # --- Scoring (compact two-column table) ---
+    # --- Top Performers (dual-column, below AT A GLANCE / LINE SCORE) ---
+    def _top_performers(team_short: str) -> list[str]:
+        """Pick 2 top batters (by hits/RBI/HR) + the team's pitcher of record."""
+        lines: list[str] = []
+        # Pitcher of record from this team (WP, LP, or SV).
+        decision_pitcher = None
+        for p in pitching:
+            if p.get("team") != team_short:
+                continue
+            dec = p.get("decision") or ""
+            if dec in ("W", "L", "S"):
+                decision_pitcher = p
+                break
+        if decision_pitcher:
+            nm = last_name(decision_pitcher.get("name") or "")
+            pid = decision_pitcher.get("player_id") or ""
+            nm_linked = f'[**{nm}**](#pit-{pid})' if pid else f"**{nm}**"
+            dec = decision_pitcher.get("decision") or ""
+            ip = fmt_ip(decision_pitcher.get("ip"))
+            h = decision_pitcher.get("h", 0)
+            er = decision_pitcher.get("er", 0)
+            k = decision_pitcher.get("k", 0)
+            bb = decision_pitcher.get("bb", 0)
+            lines.append(
+                f"- {nm_linked} {sb_tag_html(dec)} — "
+                f"{ip} {stat_label('IP')}, "
+                f"{h} {stat_label('H')}, "
+                f"{er} {stat_label('ER')}, "
+                f"{bb} {stat_label('BB')}, "
+                f"{k} {stat_label('K')}"
+            )
+        # Top 2 batters, but only include those with meaningful contributions.
+        hitters = _top_batters(batting, team_short, 3)
+        shown = 0
+        for b in hitters:
+            if shown >= 2:
+                break
+            h = int(b.get("h") or 0)
+            rbi = int(b.get("rbi") or 0)
+            hr = int(b.get("hr") or 0)
+            if h == 0 and rbi == 0:
+                continue
+            nm = last_name(b.get("name") or "")
+            pid = b.get("player_id") or ""
+            nm_linked = f'[**{nm}**](#bat-{pid})' if pid else f"**{nm}**"
+            pos = b.get("position") or ""
+            ab = int(b.get("ab") or 0)
+            bits = [f"{h}-for-{ab}"]
+            if hr: bits.append(f"{hr} {stat_label('HR')}")
+            if rbi: bits.append(f"{rbi} {stat_label('RBI')}")
+            line_ = f"- {nm_linked} {pos_tag(pos)} — " + ", ".join(bits)
+            lines.append(line_)
+            shown += 1
+        return lines
+
+    away_perf = _top_performers(away_short)
+    home_perf = _top_performers(home_short)
+    performers_block = (
+        '<div class="twocol perf">\n\n'
+        f'<section class="team-{away_abbr}">\n\n'
+        f"**{away_pill} Top performers**\n\n"
+        + ("\n".join(away_perf) if away_perf else "_—_")
+        + "\n\n</section>\n\n"
+        f'<section class="team-{home_abbr}">\n\n'
+        f"**{home_pill} Top performers**\n\n"
+        + ("\n".join(home_perf) if home_perf else "_—_")
+        + "\n\n</section>\n\n"
+        "</div>"
+    )
+
+    # --- Scoring (compact table; each inning cell links to the PBP entry below) ---
     scoring_rows: list[str] = []
     for pl in plays:
         if not pl.get("is_scoring_play"):
             continue
         inn = int(pl["inning"])
-        team_label = (away_short if pl["half"] == "top" else home_short).upper()
+        pill_for_row = away_pill if pl["half"] == "top" else home_pill
         desc = first_sentence((pl.get("description") or "").strip()).replace("\n", " ").rstrip(". ")
         a = int(pl.get("away_score_after") or 0)
         h = int(pl.get("home_score_after") or 0)
         glyph = "⚾" if pl.get("event") == "Home Run" else "·"
-        scoring_rows.append(f"| {glyph} {team_label} {ord_abbr(inn)} | {desc}. | {a}\u2013{h} |")
+        glyph_span = f'<span class="sc-glyph">{glyph}</span>'
+        # Anchor link: each PBP list item gets id="play-N"; clicking the
+        # inning cell jumps to the matching play below. Team pill replaces
+        # the plain three-letter abbreviation.
+        play_idx = pl.get("idx")
+        label = f"{glyph_span} {pill_for_row} {ord_abbr(inn)}"
+        inning_cell = f'<a href="#play-{play_idx}">{label}</a>' if play_idx is not None else label
+        scoring_rows.append(f"| {inning_cell} | {desc}. | {a}\u2013{h} |")
     if scoring_rows:
         hdr = f"| Inn | Play | Score ({away_short}\u2013{home_short}) |"
         sep = "|-----|------|-------------|"
         scoring_block = "\n".join([hdr, sep] + scoring_rows)
     else:
         scoring_block = "_No scoring plays._"
+
+    # --- Win Probability chart + Top 5 Plays (wWPA/wWE from feed) ---
+    wp_plays = [pl for pl in plays if str(pl.get("wp_home") or "") != ""]
+    if wp_plays:
+        # SVG step chart. X = plays in order (uniform spacing); Y = home WP (0-100).
+        # Red region (home trailing in odds) sits above the line; gray below.
+        # Axis labels match the Baseball-Reference convention: away team on top.
+        W, H = 760, 180
+        pad_l, pad_r, pad_t, pad_b = 36, 10, 14, 22
+        n = len(wp_plays)
+        plot_w = W - pad_l - pad_r
+        plot_h = H - pad_t - pad_b
+        step = plot_w / max(n, 1)
+        # Build polyline points (step chart)
+        points: list[tuple[float, float]] = []
+        for i, pl in enumerate(wp_plays):
+            try:
+                wph = float(pl.get("wp_home") or 0.0)
+            except ValueError:
+                wph = 0.0
+            x0 = pad_l + i * step
+            x1 = pad_l + (i + 1) * step
+            # y increases downward. Top of plot = away (SDP) at 100%;
+            # bottom = home (LAA) at 100%. So y = home_wp share.
+            y = pad_t + (wph / 100.0) * plot_h
+            points.append((x0, y))
+            points.append((x1, y))
+        # Build fill path (area under line for home team)
+        area = f"M{pad_l},{pad_t + plot_h} " + " ".join(f"L{x:.1f},{y:.1f}" for x, y in points) + f" L{pad_l + n*step:.1f},{pad_t + plot_h} Z"
+        line = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points)
+        # Inning tick marks along x-axis
+        ticks: list[str] = []
+        seen_half: set[tuple[int, str]] = set()
+        for i, pl in enumerate(wp_plays):
+            key = (int(pl["inning"]), pl["half"])
+            if key in seen_half:
+                continue
+            seen_half.add(key)
+            xt = pad_l + i * step
+            letter = "t" if pl["half"] == "top" else "b"
+            lbl = f"{letter}{pl['inning']}"
+            ticks.append(
+                f'<line x1="{xt:.1f}" y1="{pad_t}" x2="{xt:.1f}" y2="{pad_t + plot_h}" class="wp-tick"/>'
+                f'<text x="{xt:.1f}" y="{H - 6}" class="wp-tick-lbl">{lbl}</text>'
+            )
+        # Y labels (team names at top/bottom, 50% middle)
+        y50 = pad_t + plot_h / 2
+        wp_chart_svg = (
+            f'<svg class="wp-chart" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" '
+            f'preserveAspectRatio="xMidYMid meet" role="img" aria-label="Win probability by play">'
+            f'<rect x="{pad_l}" y="{pad_t}" width="{plot_w}" height="{plot_h}" class="wp-bg"/>'
+            f'<path d="{area}" class="wp-area"/>'
+            f'<line x1="{pad_l}" y1="{y50}" x2="{pad_l + plot_w}" y2="{y50}" class="wp-mid"/>'
+            f'<path d="{line}" class="wp-line"/>'
+            f'<text x="{pad_l - 6}" y="{pad_t + 10}" class="wp-axis">{away_short}</text>'
+            f'<text x="{pad_l - 6}" y="{y50 + 4}" class="wp-axis">50%</text>'
+            f'<text x="{pad_l - 6}" y="{pad_t + plot_h}" class="wp-axis">{home_short}</text>'
+            + "".join(ticks)
+            + "</svg>"
+        )
+        # Top 5 plays by |wpa_home|
+        def _wpa(pl: dict) -> float:
+            try:
+                return abs(float(pl.get("wpa_home") or 0.0))
+            except ValueError:
+                return 0.0
+        ranked = sorted(wp_plays, key=_wpa, reverse=True)[:5]
+        top_rows: list[str] = []
+        for pl in ranked:
+            inn = int(pl["inning"])
+            inn_code = f"{'t' if pl['half']=='top' else 'b'}{inn}"
+            bat_abbr = away_abbr if pl["half"] == "top" else home_abbr
+            bat_pill = away_pill if pl["half"] == "top" else home_pill
+            inn_pill = (
+                f'<span class="team-badge team-{bat_abbr}">{inn_code}</span>'
+                if bat_abbr else inn_code
+            )
+            batter = last_name(pl.get("batter") or "")
+            pitcher = last_name(pl.get("pitcher") or "")
+            desc = first_sentence((pl.get("description") or "").strip()).rstrip(". ")
+            try:
+                wpa = float(pl.get("wpa_home") or 0.0)
+            except ValueError:
+                wpa = 0.0
+            try:
+                wwe = float(pl.get("wp_home") or 0.0)
+            except ValueError:
+                wwe = 0.0
+            a = int(pl.get("away_score_after") or 0)
+            h = int(pl.get("home_score_after") or 0)
+            idx_anchor = pl.get("idx")
+            inn_cell = f'<a href="#play-{idx_anchor}">{inn_pill}</a>' if idx_anchor is not None else inn_pill
+            top_rows.append(
+                f"| {inn_cell} | {a} – {h} | {batter} | {pitcher} | {abs(wpa):.0f}% | {wwe:.0f}% | {desc}. |"
+            )
+        top5_hdr = "| Inn | Score | Batter | Pitcher | wWPA | wWE | Play |"
+        top5_sep = "|-----|-------|--------|---------|------|-----|------|"
+        top5_table = "\n".join([top5_hdr, top5_sep] + top_rows)
+        wp_block = (
+            f'<div class="wp-chart-wrap">{wp_chart_svg}</div>\n\n'
+            f'*Height of bar indicates home-team win probability; red band = away team leading odds.*\n\n'
+            f'### Top 5 Plays by Win Probability Added\n\n{top5_table}'
+        )
+    else:
+        wp_block = ""
 
     # --- Line score ---
     inning_rows = [i for i in linescore if i.get("inning") not in ("R", "H", "E")]
@@ -650,6 +996,45 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         return f"| {team_name} | " + " | ".join(cells) + f" | **{r}** | {h} | {e} |"
 
     line_table = "\n".join([header, sep, _line_row(away_name, "away"), _line_row(home_name, "home")])
+
+    # --- Decisions block (sits under the line score to use the leftover column space) ---
+    decision_lines: list[str] = []
+    label_for = {"W": "Win", "L": "Loss", "S": "Save"}
+    for dec in ("W", "L", "S"):
+        p = next((x for x in pitching if (x.get("decision") or "") == dec), None)
+        if not p:
+            continue
+        nm = last_name(p.get("name") or "")
+        pid = p.get("player_id") or ""
+        nm_html = f'<a href="#pit-{pid}"><strong>{nm}</strong></a>' if pid else f"<strong>{nm}</strong>"
+        team = p.get("team") or ""
+        team_abbr = away_abbr if team == away_short else (home_abbr if team == home_short else "")
+        team_pill_html = (
+            f'<span class="team-badge team-{team_abbr}">{team_abbr}</span>' if team_abbr else team
+        )
+        ip = fmt_ip(p.get("ip"))
+        h = p.get("h", 0); er = p.get("er", 0); bb = p.get("bb", 0); k = p.get("k", 0)
+        era = p.get("era_season") or ""
+        era_bit = f", {era} ERA" if era not in ("", "-.--") else ""
+        decision_lines.append(
+            f'<li><span class="dec-tag sb-tag sb-{dec.lower()}">{label_for[dec]}</span> '
+            f"{team_pill_html} {nm_html} — "
+            f"{ip} IP, {h} H, {er} ER, {bb} BB, {k} K{era_bit}</li>"
+        )
+    decisions_block = (
+        f'<ul class="decisions">{"".join(decision_lines)}</ul>' if decision_lines else ""
+    )
+
+    # --- Team records line (bottom-filler under the decisions block) ---
+    away_rec = (g.get("away_record") or "").strip()
+    home_rec = (g.get("home_record") or "").strip()
+    if away_rec or home_rec:
+        records_line = (
+            f'<p class="records">{away_pill} {away_name} <strong>{away_rec}</strong> · '
+            f'{home_pill} {home_name} <strong>{home_rec}</strong></p>'
+        )
+    else:
+        records_line = ""
 
     # --- Play-by-play game log ---
     inning_order: list[tuple[int, str]] = []
@@ -696,10 +1081,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
             event_marker = "⚾ " if event == "Home Run" else ""
             tag = pl.get("event_tag") or ""
-            tag_prefix = f"`{tag}` " if tag else ""
+            tag_prefix = (sb_tag_html(tag) + " ") if tag else ""
             # Compact single-line format: count "B-S, NP" (one pitch shows as "1P").
             count_bit = f"{b}-{s}, {pitch_count}P" if pitch_count else f"{b}-{s}"
-            row = f"{i}. {tag_prefix}{event_marker}**{batter}** vs. {pitcher} — {desc}"
+            # Anchor for SCORING-table deep links (#play-N).
+            play_idx = pl.get("idx")
+            anchor = f'<a id="play-{play_idx}"></a>' if play_idx is not None else ""
+            row = f"{i}. {anchor}{tag_prefix}{event_marker}**{batter}** vs. {pitcher} — {desc}"
             if scored:
                 row += f" **[{away_short} {a}, {home_short} {h}]**"
             row += f" · {count_bit}"
@@ -711,6 +1099,18 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     game_log = "\n\n".join(log_sections) if log_sections else "_No play-by-play data available._"
 
     # --- Box score tables ---
+    # Box-score cell emphasis helpers:
+    # - `_em(x)`: bold when > 0, dim "·" when 0 (quickly eye-scan for production)
+    # - `_emz(x)`: bold when > 0, normal "0" when 0 (used for columns where
+    #              zero is meaningful and we don't want to hide it, e.g. AB)
+    def _em(x) -> str:
+        v = int(x or 0)
+        return f"**{v}**" if v else '<span class="dim">·</span>'
+
+    def _emz(x) -> str:
+        v = int(x or 0)
+        return f"**{v}**" if v else "0"
+
     def bat_table(team_short: str) -> str:
         rows = ["| Player | Pos | AB | R | H | RBI | BB | K | AVG |",
                 "|--------|-----|----|----|----|-----|----|----|-----|"]
@@ -720,10 +1120,16 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         for b in team_rows:
             if b.get("ab") in (None, ""):
                 continue
-            name = b["name"]
+            # Anchor on the player name cell so top-performers links resolve.
+            pid = b.get("player_id") or ""
+            name_anchor = f'<a id="bat-{pid}"></a>' if pid else ""
+            name = f"{name_anchor}{b['name']}"
             pos = b.get("position") or ""
             avg = b.get("avg_season") if b.get("avg_season") not in (None, "") else "—"
-            rows.append(f"| {name} | {pos} | {b.get('ab',0)} | {b.get('r',0)} | {b.get('h',0)} | {b.get('rbi',0)} | {b.get('bb',0)} | {b.get('k',0)} | {avg} |")
+            rows.append(
+                f"| {name} | {pos} | {b.get('ab',0)} | {_em(b.get('r'))} | {_em(b.get('h'))}"
+                f" | {_em(b.get('rbi'))} | {_em(b.get('bb'))} | {_em(b.get('k'))} | {avg} |"
+            )
             totals["ab"] += int(b.get("ab") or 0)
             totals["r"] += int(b.get("r") or 0)
             totals["h"] += int(b.get("h") or 0)
@@ -741,11 +1147,18 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         for p in team_rows:
             if p.get("ip") in (None, ""):
                 continue
+            pid = p.get("player_id") or ""
+            name_anchor = f'<a id="pit-{pid}"></a>' if pid else ""
             name = p["name"]
             tag = p.get("decision") or ""
-            label = f"{name}{' ('+tag+')' if tag else ''}"
+            # Decision tag (W/L/S) as a colored pill — green/red/gold.
+            tag_pill = (" " + sb_tag_html(tag)) if tag else ""
+            label = f"{name_anchor}{name}{tag_pill}"
             era = p.get("era_season") if p.get("era_season") not in (None, "") else "—"
-            rows.append(f"| {label} | {fmt_ip(p.get('ip'))} | {p.get('h',0)} | {p.get('r',0)} | {p.get('er',0)} | {p.get('bb',0)} | {p.get('k',0)} | {p.get('hr',0)} | {era} |")
+            rows.append(
+                f"| {label} | {fmt_ip(p.get('ip'))} | {_em(p.get('h'))} | {_em(p.get('r'))}"
+                f" | {_em(p.get('er'))} | {_em(p.get('bb'))} | {_em(p.get('k'))} | {_em(p.get('hr'))} | {era} |"
+            )
         return "\n".join(rows)
 
     # --- At a glance ---
@@ -755,18 +1168,60 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     wind = g.get("wind") or ""
     first_pitch = g.get("first_pitch") or "—"
     umps = g.get("umpires") or "—"
-    at_glance = (
-        f"| | |\n|---|---|\n"
-        f"| **Final** | {winner_name} {w_score}, {loser_name} {l_score} |\n"
-        f"| **Venue** | {venue} · Att. {att} |\n"
-        f"| **Time** | {dur} · First pitch {first_pitch} |\n"
-        f"| **Weather** | {wx}{(' · Wind ' + str(wind)) if wind else ''} |\n"
-        f"| **Winning pitcher** | {wp or '—'} |\n"
-        f"| **Losing pitcher** | {lp or '—'} |\n"
-        + (f"| **Save** | {sv} |\n" if sv else "")
-        + f"| **Umpires** | {umps} |\n"
-        f"| **Records** | {away_short} {g.get('away_record','')} at {home_short} {g.get('home_record','')} |"
-    )
+
+    # External references — deep links to premium baseball research sites.
+    # Each uses its own standard URL pattern; the subscription user's session
+    # handles auth, we just compose the URL.
+    _game_date = g["date"]
+    br_url = br_box_url(home_abbr or home_short, _game_date) if home_abbr else ""
+    fg_url = fangraphs_box_url(_game_date, away_short)
+    ohtani_url = f"https://mlb.theohtani.com/game/{g.get('gamePk','')}" if g.get("gamePk") else ""
+    ref_parts = [f'<a href="{br_url}">Baseball-Reference</a>'] if br_url else []
+    ref_parts.append(f'<a href="{fg_url}">FanGraphs</a>')
+    if ohtani_url:
+        ref_parts.append(f'<a href="{ohtani_url}">mlb.theohtani.com</a>')
+    # Sibling companions: the 1930s broadcast and the raw Markdown source.
+    ds_name = Path(dataset.get("_dir", "")).name if dataset.get("_dir") else ""
+    if ds_name:
+        library_dir = Path(dataset["_dir"]).parent
+        broadcast_html = library_dir / f"{ds_name}-broadcast.html"
+        broadcast_md = library_dir / f"{ds_name}-broadcast.md"
+        if broadcast_html.exists():
+            ref_parts.append(f'<a href="{ds_name}-broadcast.html" title="1930s radio broadcast">🎙 1930s radio call</a>')
+        elif broadcast_md.exists():
+            ref_parts.append(f'<a href="{ds_name}-broadcast.md" title="1930s radio broadcast (Markdown)">🎙 1930s radio call</a>')
+        ref_parts.append(f'<a href="{ds_name}.md" title="Markdown source">📄 .md</a>')
+    external_refs = '<p class="external-refs">Also at: ' + " · ".join(ref_parts) + '</p>'
+
+    # Compact symbol-driven AT A GLANCE banner (replaces the former 2-col table).
+    # Every line leads with a recognizable glyph; team badges anchor the score;
+    # baseball-native abbreviations (W, L, SV, HP, 1B, 2B, 3B) carry the labels.
+    # Each pitcher of record gets a team pill so you can tell whose WP/LP/SV
+    # it is without cross-referencing the score.
+    # AT A GLANCE is now the game-context card: venue, crowd, time, weather,
+    # umpires. The W/L/SV decisions and team records live in the LINE SCORE
+    # column (decisions_block + records_line) so we don't duplicate them.
+    wind_piece = f" · 💨 {wind_arrow(wind)}" if wind else ""
+    # Compute pace (minutes per half-inning) as a small novelty stat —
+    # surfaces something the line score can't already show at a glance.
+    pace_line = ""
+    try:
+        dur_s = (dur or "").strip()
+        if dur_s and ":" in dur_s:
+            h_, m_ = dur_s.split(":")[:2]
+            total_min = int(h_) * 60 + int(m_)
+            half_innings = max(1, len([i for i in linescore if i.get("inning") not in ("R","H","E")])) * 2
+            pace_line = f"⏲ {total_min // half_innings}m per half-inning"
+    except (ValueError, TypeError):
+        pass
+    glance_lines = [
+        f'<p class="score">{away_pill} {away_r} — {home_r} {home_pill}</p>',
+        f"🏟 {venue} · 👥 {att} · ⏱ {dur} · 🕕 {first_pitch}",
+        f"☀ {wx}{wind_piece}" if wx and wx != "—" else "",
+        f"⚖ {tag_umpires(umps)}" if umps and umps != "—" else "",
+        pace_line,
+    ]
+    at_glance = '<div class="glance">\n\n' + "\n\n".join(s for s in glance_lines if s) + "\n\n</div>"
 
     # --- Atmosphere ---
     atmosphere_rows: list[str] = []
@@ -812,7 +1267,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     if wx and wx != "—":
         wx_glyph = weather_glyph(str(wx))
-        wind_clause = f" · \U0001f4a8 Wind {wind}" if wind else ""
+        wind_clause = f" · \U0001f4a8 Wind {wind_arrow(wind)}" if wind else ""
         atmosphere_rows.append(f"- **Weather.** {wx_glyph} {wx}{wind_clause}")
     if g.get("city") and g.get("state"):
         atmosphere_rows.append(
@@ -911,9 +1366,14 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
                     if pi.get("distance_ft") not in (None, ""):
                         parts.append(f"{int(float(pi['distance_ft']))} ft")
                     sc = ", ".join(parts)
+            # Link the inning/count citation to the matching PBP entry below.
+            pl_idx = pl.get("idx")
+            citation = f"**{batter}** vs. **{pitcher}**, {half_word} of the {ord_abbr(inn)}, {b}-{s_} count"
+            if pl_idx is not None:
+                citation = f"[{citation}](#play-{pl_idx})"
             moment_block = (
                 f"> _\u201c{desc}\u201d_\n>\n"
-                f"> — **{batter}** vs. **{pitcher}**, {half_word} of the {ord_abbr(inn)}, {b}-{s_} count."
+                f"> — {citation}."
             )
             if sc:
                 moment_block += f" {sc}."
@@ -966,27 +1426,131 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         except (ValueError, TypeError):
             notable = {}
 
-    # --- Notes section (game-context items only) ---
-    notes_lines: list[str] = []
+    # --- Media (photos + videos; auto-discovered from dataset dir) ---
+    # The dataset directory can hold `photos/` and `videos/` subdirs — when
+    # media files are present, a MEDIA section is emitted with links.
+    # Anthony's wife takes photos/videos at the games; we link them here as
+    # she processes them. Add files manually; we auto-index on render.
+    PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".avif"}
+    VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".webm", ".mkv"}
+    media_block = ""
+    ds_dir = dataset.get("_dir")
+    if ds_dir and Path(ds_dir).is_dir():
+        ds_dir = Path(ds_dir)
+        slug_name = ds_dir.name
+        photos_dir = ds_dir / "photos"
+        videos_dir = ds_dir / "videos"
+        photos = sorted([p for p in photos_dir.iterdir() if p.suffix.lower() in PHOTO_EXTS]) if photos_dir.is_dir() else []
+        videos = sorted([v for v in videos_dir.iterdir() if v.suffix.lower() in VIDEO_EXTS]) if videos_dir.is_dir() else []
+        if photos or videos:
+            parts: list[str] = []
+            if photos:
+                parts.append("**📷 Photos** (" + str(len(photos)) + ")")
+                parts.append(
+                    "\n".join(
+                        f'- <a href="{slug_name}/photos/{p.name}">{p.stem}</a>'
+                        for p in photos
+                    )
+                )
+            if videos:
+                parts.append("**🎥 Videos** (" + str(len(videos)) + ")")
+                parts.append(
+                    "\n".join(
+                        f'- <a href="{slug_name}/videos/{v.name}">{v.stem}</a>'
+                        for v in videos
+                    )
+                )
+            media_block = "\n\n".join(parts)
+
+    # --- Notes section (three columns: away lineup · home lineup · game context) ---
+    # Symbols chosen for scannability (baseball-page conventions where possible):
+    # ⚖ umpires · 👥 attendance · ⏱ duration · 🕕 first pitch · 💨 wind · 📋 records
+    # ⚠ balks / wild pitches · 🎯 pickoffs · 🚪 ejections · ⏰ pitch-timer violations
+    NOTE_GLYPH = {
+        "Umpires": "⚖",
+        "First pitch": "🕕",
+        "Attendance": "👥",
+        "Duration": "⏱",
+        "Weather": "☀",
+        "Wind": "💨",
+        "Records": "📋",
+        "WP": "⚡",
+        "PB": "✋",
+        "Balk": "⚠",
+        "HBP": "💥",
+        "IBB": "⊕",
+        "SB": "⚡",
+        "CS": "⊗",
+        "E": "✕",
+        "DP": "⇉",
+        "Pickoffs": "🎯",
+        "Ejections": "🚪",
+        "Disengagement violations": "⏰",
+        "Pitch timer violations": "⏰",
+    }
+
+    def _note_line(label: str, value: str) -> str:
+        glyph = NOTE_GLYPH.get(label, "·")
+        return f"- {glyph} **{label}:** {value}"
+
+    # Column 3: game-context notes (umpires, attendance, weather, violations, etc.)
+    game_notes_lines: list[str] = []
     for k in NOTES_SECTION_KEYS:
         if notable.get(k):
-            notes_lines.append(f"- **{k}:** {notable[k]}")
+            game_notes_lines.append(_note_line(k, str(notable[k])))
     if g.get("umpires") and g["umpires"] != "—":
-        notes_lines.append(f"- **Umpires:** {g['umpires']}")
+        game_notes_lines.append(_note_line("Umpires", tag_umpires(g["umpires"])))
     if g.get("first_pitch") and g["first_pitch"] != "—":
-        notes_lines.append(f"- **First pitch:** {g['first_pitch']}")
+        game_notes_lines.append(_note_line("First pitch", g["first_pitch"]))
     if g.get("attendance") and g["attendance"] != "—":
-        notes_lines.append(f"- **Attendance:** {g['attendance']}")
+        game_notes_lines.append(_note_line("Attendance", g["attendance"]))
     if g.get("duration") and g["duration"] != "—":
-        notes_lines.append(f"- **Duration:** {g['duration']}")
+        game_notes_lines.append(_note_line("Duration", g["duration"]))
     if g.get("weather") and g["weather"] != "—":
-        notes_lines.append(f"- **Weather:** {g['weather']}")
+        game_notes_lines.append(_note_line("Weather", g["weather"]))
     if g.get("wind"):
-        notes_lines.append(f"- **Wind:** {g['wind']}")
+        game_notes_lines.append(_note_line("Wind", wind_arrow(g["wind"])))
     if g.get("away_record") or g.get("home_record"):
-        notes_lines.append(
-            f"- **Records:** {away_short} {g.get('away_record','')} · {home_short} {g.get('home_record','')}"
-        )
+        game_notes_lines.append(_note_line(
+            "Records",
+            f"{away_pill} {g.get('away_record','')} · {home_pill} {g.get('home_record','')}"
+        ))
+
+    # Columns 1–2: starting lineups (1–9 with position; DH gets line 10 if listed).
+    def _lineup_lines(team_short: str) -> list[str]:
+        roster = [b for b in batting if b.get("team") == team_short]
+        starters = [b for b in roster if b.get("is_starter") in (True, "True", "true", 1, "1")]
+        # Sort by batting order (already the insertion order, but be explicit).
+        starters.sort(key=lambda b: int(b.get("order") or 99))
+        lines: list[str] = []
+        for b in starters:
+            pos = b.get("position") or ""
+            name = last_name(b.get("name") or "")
+            order = b.get("order")
+            if order in (None, "", 0):
+                continue
+            lines.append(f"{order}. {pos_tag(pos)} {name}")
+        return lines
+
+    away_lineup = _lineup_lines(away_short)
+    home_lineup = _lineup_lines(home_short)
+
+    notes_block = (
+        '<div class="threecol notes-card">\n\n'
+        f'<section class="team-{away_abbr}">\n\n'
+        f"**{away_pill} Lineup**\n\n"
+        + ("\n".join(away_lineup) if away_lineup else "_—_")
+        + "\n\n</section>\n\n"
+        f'<section class="team-{home_abbr}">\n\n'
+        f"**{home_pill} Lineup**\n\n"
+        + ("\n".join(home_lineup) if home_lineup else "_—_")
+        + "\n\n</section>\n\n"
+        "<section>\n\n"
+        "**📋 Game notes**\n\n"
+        + ("\n".join(game_notes_lines) if game_notes_lines else "_No notable events logged._")
+        + "\n\n</section>\n\n"
+        "</div>"
+    )
 
     # --- Batting notes (per team, below each batting table) ---
     def _batting_notes(team_short: str) -> str:
@@ -1041,17 +1605,17 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         def _fmt(lst: list[str]) -> str:
             return "; ".join(lst) if lst else "\u2014"
 
-        bat_line = (
-            f"2B: {_fmt(doubles)}. "
-            f"3B: {_fmt(triples)}. "
-            f"HR: {_fmt(hr_entries)}. "
-            f"\u00b7 SB: {sb_ct if sb_ct not in (None,'','0',0) else '\u2014'}. "
-            f"CS: {cs_ct if cs_ct not in (None,'','0',0) else '\u2014'}. "
-            f"SH: {_fmt(sh)}. "
-            f"SF: {_fmt(sf)}. "
-            f"HBP: {_fmt(hbp_entries)} "
-            f"\u00b7 GIDP: {_fmt(gidp)}."
-        )
+        bat_line = " · ".join([
+            f"{sb_tag_html('2B')} {_fmt(doubles)}",
+            f"{sb_tag_html('3B')} {_fmt(triples)}",
+            f"{sb_tag_html('HR')} {_fmt(hr_entries)}",
+            f"{sb_tag_html('SB')} {sb_ct if sb_ct not in (None,'','0',0) else '\u2014'}",
+            f"{sb_tag_html('CS')} {cs_ct if cs_ct not in (None,'','0',0) else '\u2014'}",
+            f"{sb_tag_html('SH')} {_fmt(sh)}",
+            f"{sb_tag_html('SF')} {_fmt(sf)}",
+            f"{sb_tag_html('HBP')} {_fmt(hbp_entries)}",
+            f"{sb_tag_html('GIDP')} {_fmt(gidp)}",
+        ])
         return f"**Batting notes** — {bat_line}"
 
     # --- Pitching notes (per team, below each pitching table) ---
@@ -1099,19 +1663,22 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         # PB is attributed to the catcher — we don't have per-team catcher lists handy; show raw if present.
         pb_line = _nb("PB") if notable.get("PB") else "\u2014"
 
-        head = (
-            f"**Pitching notes** — WP: {wp_line}. PB: {pb_line}. Balk: {balk_line}. "
-            f"IBB: {ibb_line}. Pickoffs: {pko_line}."
-        )
+        head = "**Pitching notes** — " + " · ".join([
+            f"{sb_tag_html('WP')} {wp_line}",
+            f"{sb_tag_html('PB')} {pb_line}",
+            f"{sb_tag_html('Balk')} {balk_line}",
+            f"{sb_tag_html('IBB')} {ibb_line}",
+            f"{sb_tag_html('Pickoffs')} {pko_line}",
+        ])
         tail_bits = []
         if pitches_strikes != "\u2014":
-            tail_bits.append(f"Pitches-strikes: {pitches_strikes}")
+            tail_bits.append(f"**Pitches-strikes** {pitches_strikes}")
         if inh != "\u2014":
-            tail_bits.append(f"Inherited runners-scored: {inh}")
+            tail_bits.append(f"**Inherited runners–scored** {inh}")
         if bf != "\u2014":
-            tail_bits.append(f"Batters faced: {bf}")
+            tail_bits.append(f"**Batters faced** {bf}")
         if tail_bits:
-            head += " \u00b7 " + ". ".join(tail_bits) + "."
+            head += " · " + " · ".join(tail_bits)
         return head
 
     # --- Frontmatter ---
@@ -1131,75 +1698,132 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         + "---\n"
     )
 
+    # Optional BR link on the headline (title click-through to the canonical
+    # boxscore on Baseball-Reference — they don't mind inbound links).
+    headline_md = f"[{headline}]({br_url})" if br_url else headline
+
     md = f"""{frontmatter}
-# {headline}
+# {headline_md}
 {subhead}
+{external_refs}
 {attended_banner}
 {lede_para}
 
 ---
 
+<div class="twocol">
+
+<section>
+
 ## AT A GLANCE
 
 {at_glance}
 
-## KEY TAKEAWAYS
+</section>
 
-{takeaways_block}
-
-## ATMOSPHERE
-
-{atmosphere_block}
-
-## ★ MOMENT OF THE GAME
-
-{moment_block}
-
-## SCORING
-
-{scoring_block}
+<section>
 
 ## LINE SCORE
 
 {line_table}
 
+{decisions_block}
+
+{records_line}
+
+</section>
+
+</div>
+
+## ✨ TOP PERFORMERS
+
+{performers_block}
+
 ## BOX SCORE — BATTING
 
-**{away_name}**
+<div class="twocol boxes">
+
+<section class="team-{away_abbr}">
+
+{away_pill} **{away_name}**
 
 {bat_table(away_short)}
 
 {_batting_notes(away_short)}
 
-**{home_name}**
+</section>
+
+<section class="team-{home_abbr}">
+
+{home_pill} **{home_name}**
 
 {bat_table(home_short)}
 
 {_batting_notes(home_short)}
 
+</section>
+
+</div>
+
 ## BOX SCORE — PITCHING
 
-**{away_name}**
+<div class="twocol boxes">
+
+<section class="team-{away_abbr}">
+
+{away_pill} **{away_name}**
 
 {pit_table(away_short)}
 
 {_pitching_notes(away_short)}
 
-**{home_name}**
+</section>
+
+<section class="team-{home_abbr}">
+
+{home_pill} **{home_name}**
 
 {pit_table(home_short)}
 
 {_pitching_notes(home_short)}
 
-## NOTES
+</section>
 
-{chr(10).join(notes_lines) if notes_lines else '_No notable events logged._'}
+</div>
+
+<div class="twocol">
+
+<section>
+
+## ATMOSPHERE
+
+{atmosphere_block}
+
+</section>
+
+<section>
+
+## ★ MOMENT OF THE GAME
+
+{moment_block}
+
+</section>
+
+</div>
+
+## SCORING
+
+{scoring_block}
+
+{('## WIN PROBABILITY' + chr(10) + chr(10) + wp_block + chr(10) + chr(10)) if wp_block else ''}## NOTES
+
+{notes_block}
 
 ## PLAY-BY-PLAY
 
 {game_log}
 
-{personal_notes_block}---
+{('## MEDIA' + chr(10) + chr(10) + media_block + chr(10) + chr(10)) if media_block else ''}{personal_notes_block}---
 
 *Source: MLB Stats API, gamePk {g.get('gamePk','')}.*
 """
@@ -1245,6 +1869,12 @@ def render_html(md_path: Path, body_class: str = ""):
         "", html, count=1, flags=re.DOTALL,
     )
     html = re.sub(r'<h1 class="title">[^<]*</h1>\s*', "", html, count=1)
+    # Strip pandoc's auto-rendered `<p class="date">…</p>` (produced from the
+    # YAML `date:` frontmatter we write for INDEX scanning). The date is
+    # already present in the dateline + AT A GLANCE block.
+    html = re.sub(r'<p class="date">[^<]*</p>\s*', "", html, count=1)
+    # And any stray empty title-block header wrapper pandoc leaves behind.
+    html = re.sub(r'<header id="title-block-header">\s*</header>\s*', "", html, count=1)
     style_block = f"<style>\n{css}\n</style>"
     # Site nav is injected by /nav.js on the hosted site (see mlb-games/nav.js).
     # The file is served from the site root, so an absolute /nav.js path works
