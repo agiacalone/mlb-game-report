@@ -1012,7 +1012,8 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         r, h, e = _totals(side)
         return f"| {team_name} | " + " | ".join(cells) + f" | **{r}** | {h} | {e} |"
 
-    line_table = "\n".join([header, sep, _line_row(away_name, "away"), _line_row(home_name, "home")])
+    # First-column label uses the team pill rather than the full team name.
+    line_table = "\n".join([header, sep, _line_row(away_pill, "away"), _line_row(home_pill, "home")])
 
     # --- Decisions block (sits under the line score to use the leftover column space) ---
     decision_lines: list[str] = []
@@ -1957,10 +1958,8 @@ def rebuild_index(library: Path) -> None:
             fa = int(e.get('final_away','0') or 0); fh = int(e.get('final_home','0') or 0)
         except ValueError:
             fa = fh = 0
-        if fh > fa:
-            final = f"{hm_s} {fh}, {aw_s} {fa}"
-        else:
-            final = f"{aw_s} {fa}, {hm_s} {fh}"
+        # Final column mirrors the matchup's away-home pill form (no @ separator).
+        final = f"{aw_pill} {fa} · {hm_pill} {fh}"
         stem = Path(e["_file"]).stem
         html_sibling = (library / e["_file"]).with_suffix(".html")
         log_link = f"[log]({html_sibling.name})" if html_sibling.exists() else f"[log]({e['_file']})"
