@@ -1717,6 +1717,8 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         f"home_team: {home_name}\n"
         f"away_team_short: {away_short}\n"
         f"home_team_short: {home_short}\n"
+        f"away_team_abbr: {away_abbr}\n"
+        f"home_team_abbr: {home_abbr}\n"
         f"final_away: {away_r}\n"
         f"final_home: {home_r}\n"
         f"attended: {'true' if attended else 'false'}\n"
@@ -1941,25 +1943,36 @@ def rebuild_index(library: Path) -> None:
     entries.sort(key=lambda e: e.get("date", ""), reverse=True)
     lines = ["# Games Attended", "",
              f"*{len(entries)} game{'s' if len(entries) != 1 else ''} in the log.*", "",
-             "| Date | Matchup | Final | Venue | Broadcast | Notes |",
-             "|------|---------|-------|-------|-----------|-------|"]
+             "| Date | Matchup | Final | Venue | Log | Broadcast |",
+             "|------|---------|-------|-------|-----|-----------|"]
     for e in entries:
-        matchup = f"{e.get('away_team','?')} at {e.get('home_team','?')}"
-        final = f"{e.get('home_team_short','?')} {e.get('final_home','?')}, {e.get('away_team_short','?')} {e.get('final_away','?')}"
-        notes = e.get("seat", "")
+        aw_s = e.get('away_team_short','?'); hm_s = e.get('home_team_short','?')
+        aw_a = e.get('away_team_abbr') or aw_s
+        hm_a = e.get('home_team_abbr') or hm_s
+        # Team pills mirror the series-recap landing style.
+        aw_pill = f'<span class="team-badge team-{aw_a}">{aw_a}</span>' if aw_a else aw_s
+        hm_pill = f'<span class="team-badge team-{hm_a}">{hm_a}</span>' if hm_a else hm_s
+        matchup = f"{aw_pill} {aw_s} at {hm_pill} {hm_s}"
+        try:
+            fa = int(e.get('final_away','0') or 0); fh = int(e.get('final_home','0') or 0)
+        except ValueError:
+            fa = fh = 0
+        if fh > fa:
+            final = f"{hm_s} {fh}, {aw_s} {fa}"
+        else:
+            final = f"{aw_s} {fa}, {hm_s} {fh}"
         stem = Path(e["_file"]).stem
         html_sibling = (library / e["_file"]).with_suffix(".html")
-        link_target = html_sibling.name if html_sibling.exists() else e["_file"]
-        # Announcer broadcast column: link to <slug>-broadcast.html if present.
+        log_link = f"[log]({html_sibling.name})" if html_sibling.exists() else f"[log]({e['_file']})"
         bcast_html = library / f"{stem}-broadcast.html"
         bcast_md = library / f"{stem}-broadcast.md"
         if bcast_html.exists():
-            bcast_cell = f"[1930s radio call]({bcast_html.name})"
+            bcast_cell = f"[radio call]({bcast_html.name})"
         elif bcast_md.exists():
-            bcast_cell = f"[1930s radio call]({bcast_md.name})"
+            bcast_cell = f"[radio call]({bcast_md.name})"
         else:
             bcast_cell = "—"
-        lines.append(f"| {e.get('date','')} | [{matchup}]({link_target}) | {final} | {e.get('venue','')} | {bcast_cell} | {notes} |")
+        lines.append(f"| {e.get('date','')} | {matchup} | {final} | {e.get('venue','')} | {log_link} | {bcast_cell} |")
     idx_md = library / "INDEX.md"
     idx_md.write_text("\n".join(lines) + "\n")
     if any((library / e["_file"]).with_suffix(".html").exists() for e in entries):

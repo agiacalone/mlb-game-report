@@ -238,9 +238,11 @@ def fmt_player(p):
     a = abbr_of.get(p["_team"], "")
     pill = f'<span class="team-badge team-{a}">{a}</span>' if a else p["_team"]
     return f"{pill} {p['name']}"
-lines.append("_Hits:_ " + " · ".join(f"{fmt_player(p)} ({p['h']})" for p in by_hits) + "\n\n")
-lines.append("_RBI:_ " + " · ".join(f"{fmt_player(p)} ({p['rbi']})" for p in by_rbi) + "\n\n")
-lines.append("_HR:_ " + " · ".join(f"{fmt_player(p)} ({p['hr']})" for p in by_hr if p['hr']>0) + "\n\n")
+def cat(label, klass):
+    return f'<span class="sb-tag sb-{klass}">{label}</span>'
+lines.append(f'{cat("HITS", "hit")} ' + " · ".join(f"{fmt_player(p)} ({p['h']})" for p in by_hits) + "\n\n")
+lines.append(f'{cat("RBI", "hit")} ' + " · ".join(f"{fmt_player(p)} ({p['rbi']})" for p in by_rbi) + "\n\n")
+lines.append(f'{cat("HR", "hr")} ' + " · ".join(f"{fmt_player(p)} ({p['hr']})" for p in by_hr if p['hr']>0) + "\n\n")
 lines.append("</section>\n<section>\n")
 lines.append("**Pitching leaders**\n\n")
 all_pit = []
@@ -256,9 +258,9 @@ def fmt_pit(p):
     a = abbr_of.get(p["_team"], "")
     pill = f'<span class="team-badge team-{a}">{a}</span>' if a else p["_team"]
     return f"{pill} {p['name']}"
-lines.append("_IP:_ " + " · ".join(f"{fmt_pit(p)} ({fmt_ip(p['ip_outs'])})" for p in by_ip) + "\n\n")
-lines.append("_K:_ " + " · ".join(f"{fmt_pit(p)} ({p['k']})" for p in by_k) + "\n\n")
-lines.append("_ERA:_ " + " · ".join(f"{fmt_pit(p)} ({p['er']*27/p['ip_outs']:.2f})" for p in by_era) + "\n\n")
+lines.append(f'{cat("IP", "sac")} ' + " · ".join(f"{fmt_pit(p)} ({fmt_ip(p['ip_outs'])})" for p in by_ip) + "\n\n")
+lines.append(f'{cat("K", "k")} ' + " · ".join(f"{fmt_pit(p)} ({p['k']})" for p in by_k) + "\n\n")
+lines.append(f'{cat("ERA", "out")} ' + " · ".join(f"{fmt_pit(p)} ({p['er']*27/p['ip_outs']:.2f})" for p in by_era) + "\n\n")
 lines.append("</section>\n</div>\n")
 
 lines.append(f"\n---\n\n*Series recap generated from {len(games)} game datasets (MLB Stats API). All totals aggregated from per-game batting.csv / pitching.csv. Game-by-game logs and broadcasts link out of the table above.*\n")

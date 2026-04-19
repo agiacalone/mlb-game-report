@@ -262,12 +262,28 @@ body.index h1 { font-size: 2rem; }
 }
 
 @media (max-width: 48rem) {
+  /* Phones: form-tight side gutters; tables scroll horizontally if wider. */
+  html, body { font-size: 15px; }
+  body {
+    max-width: none;
+    margin: 0.5rem 0 1.5rem;
+    padding: 0 0.4rem;
+  }
   /* Narrow screens: stack the columns back to single-file */
   .twocol { grid-template-columns: 1fr; }
   .twocol.boxes > section table {
     font-size: 0.88em;
     white-space: normal;
   }
+  /* Ensure wide tables don't blow out the viewport. */
+  ol, p, h1, h2, h3 { overflow-wrap: anywhere; }
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+  /* Let the line-score + box-score tables keep their cell layout while scrolling. */
+  table > * { white-space: inherit; }
+  /* Nav: match tightened body padding. */
+  nav.site-nav { margin: -0.5rem -0.4rem 1rem; padding: 0.45rem 0.6rem; }
+  /* Three-column notes card stacks on phones. */
+  .threecol { grid-template-columns: 1fr; }
 }
 
 /* Three-column layout — used by the NOTES card (away lineup · home lineup · game notes) */
@@ -335,6 +351,7 @@ body.index h1 { font-size: 2rem; }
   --color-NYM: #FF5910;
   --color-NYY: #0C2340;
   --color-NYG: #27251F;  /* Historical NY Giants (1883–1957); black + orange, same as modern SF */
+  --color-BRO: #005A9C;  /* Historical Brooklyn Dodgers (1884–1957); dodger blue, same as modern LAD */
   --color-OAK: #003831;  --color-ATH: #003831;
   --color-PHI: #E81828;
   --color-PIT: #FDB827;
@@ -373,6 +390,7 @@ body.home-MIN, section.team-MIN, .team-badge.team-MIN { --team-primary: var(--co
 body.home-NYM, section.team-NYM, .team-badge.team-NYM { --team-primary: var(--color-NYM); --team-fg: #fff; }
 body.home-NYY, section.team-NYY, .team-badge.team-NYY { --team-primary: var(--color-NYY); --team-fg: #fff; }
 body.home-NYG, section.team-NYG, .team-badge.team-NYG { --team-primary: var(--color-NYG); --team-fg: #FD5A1E; }
+body.home-BRO, section.team-BRO, .team-badge.team-BRO { --team-primary: var(--color-BRO); --team-fg: #fff; }
 body.home-OAK, body.home-ATH, section.team-OAK, section.team-ATH, .team-badge.team-OAK, .team-badge.team-ATH { --team-primary: var(--color-OAK); --team-fg: #fff; }
 body.home-PHI, section.team-PHI, .team-badge.team-PHI { --team-primary: var(--color-PHI); --team-fg: #fff; }
 /* PIT's primary is yellow — needs dark foreground for readability. */
@@ -407,6 +425,7 @@ body.away-MIN { --team-secondary: var(--color-MIN); }
 body.away-NYM { --team-secondary: var(--color-NYM); }
 body.away-NYY { --team-secondary: var(--color-NYY); }
 body.away-NYG { --team-secondary: var(--color-NYG); }
+body.away-BRO { --team-secondary: var(--color-BRO); }
 body.away-OAK, body.away-ATH { --team-secondary: var(--color-OAK); }
 body.away-PHI { --team-secondary: var(--color-PHI); }
 body.away-PIT { --team-secondary: var(--color-PIT); }
