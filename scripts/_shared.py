@@ -1952,7 +1952,7 @@ def rebuild_index(library: Path) -> None:
         # Team pills mirror the series-recap landing style.
         aw_pill = f'<span class="team-badge team-{aw_a}">{aw_a}</span>' if aw_a else aw_s
         hm_pill = f'<span class="team-badge team-{hm_a}">{hm_a}</span>' if hm_a else hm_s
-        matchup = f"{aw_pill} {aw_s} at {hm_pill} {hm_s}"
+        matchup = f"{aw_pill} @ {hm_pill}"
         try:
             fa = int(e.get('final_away','0') or 0); fh = int(e.get('final_home','0') or 0)
         except ValueError:

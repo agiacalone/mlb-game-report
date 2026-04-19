@@ -159,7 +159,7 @@ for i, g in enumerate(games, 1):
     log_link = f"[log]({slug}.html)"
     bcast_html = SERIES / f"{slug}-broadcast.html"
     bcast_link = f"[radio call]({slug}-broadcast.html)" if bcast_html.exists() else "—"
-    matchup = f"{team_pill(aw)} {aw} at {team_pill(hm)} {hm}"
+    matchup = f"{team_pill(aw)} @ {team_pill(hm)}"
     final = f"{hm if to_int(hr) > to_int(ar) else aw} {max(to_int(ar), to_int(hr))}, {aw if to_int(hr) > to_int(ar) else hm} {min(to_int(ar), to_int(hr))}"
     lines.append(f"| {i} | {date} | {matchup} | {final} | {venue} | {log_link} | {bcast_link} |")
 
