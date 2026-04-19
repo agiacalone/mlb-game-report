@@ -206,3 +206,225 @@ a:hover {
 
 /* Index page */
 body.index h1 { font-size: 2rem; }
+
+/* ============================================================================
+ * TEAM-AWARE OVERLAY
+ * ---------------------------------------------------------------------------
+ * Self-contained team palette + overlay rules. Integrated from the former
+ * server-side style.css so every generated HTML page renders with the right
+ * team colors without needing an external stylesheet.
+ *
+ * Activation: the renderer sets body class="home-XXX away-XXX" using the
+ * 3-letter team abbreviations from game.csv. INDEX pages use "body.index".
+ * When a team class matches, its palette replaces the fallback via CSS vars.
+ * ========================================================================== */
+
+:root {
+  --team-primary:   var(--accent);   /* h1/h2 color + hr + link color */
+  --team-secondary: var(--ink);      /* h3 color */
+  --tint:           #f3ede0;
+  --zebra:          #f6f2e7;
+  --hover:          #ecd6b8;
+}
+
+/* --- Away-team palettes (set --team-secondary) --- */
+body.away-ARI, body.away-AZ  { --team-secondary: #A71930; }
+body.away-ATL { --team-secondary: #CE1141; }
+body.away-BAL { --team-secondary: #DF4601; }
+body.away-BOS { --team-secondary: #BD3039; }
+body.away-CHC { --team-secondary: #0E3386; }
+body.away-CWS { --team-secondary: #27251F; }
+body.away-CIN { --team-secondary: #C6011F; }
+body.away-CLE { --team-secondary: #00385D; }
+body.away-COL { --team-secondary: #333366; }
+body.away-DET { --team-secondary: #0C2340; }
+body.away-HOU { --team-secondary: #EB6E1F; }
+body.away-KC  { --team-secondary: #004687; }
+body.away-LAA { --team-secondary: #BA0021; }
+body.away-LAD { --team-secondary: #005A9C; }
+body.away-MIA { --team-secondary: #00A3E0; }
+body.away-MIL { --team-secondary: #12284B; }
+body.away-MIN { --team-secondary: #002B5C; }
+body.away-NYM { --team-secondary: #FF5910; }
+body.away-NYY { --team-secondary: #0C2340; }
+body.away-OAK, body.away-ATH { --team-secondary: #003831; }
+body.away-PHI { --team-secondary: #E81828; }
+body.away-PIT { --team-secondary: #FDB827; }
+body.away-SD  { --team-secondary: #2F241D; }
+body.away-SF  { --team-secondary: #FD5A1E; }
+body.away-SEA { --team-secondary: #0C2C56; }
+body.away-STL { --team-secondary: #C41E3A; }
+body.away-TB  { --team-secondary: #092C5C; }
+body.away-TEX { --team-secondary: #003278; }
+body.away-TOR { --team-secondary: #134A8E; }
+body.away-WSH { --team-secondary: #AB0003; }
+
+/* --- Home-team palettes (set --team-primary, wins visual priority) --- */
+body.home-ARI, body.home-AZ  { --team-primary: #A71930; }
+body.home-ATL { --team-primary: #CE1141; }
+body.home-BAL { --team-primary: #DF4601; }
+body.home-BOS { --team-primary: #BD3039; }
+body.home-CHC { --team-primary: #0E3386; }
+body.home-CWS { --team-primary: #27251F; }
+body.home-CIN { --team-primary: #C6011F; }
+body.home-CLE { --team-primary: #00385D; }
+body.home-COL { --team-primary: #333366; }
+body.home-DET { --team-primary: #0C2340; }
+body.home-HOU { --team-primary: #EB6E1F; }
+body.home-KC  { --team-primary: #004687; }
+body.home-LAA { --team-primary: #BA0021; }
+body.home-LAD { --team-primary: #005A9C; }
+body.home-MIA { --team-primary: #00A3E0; }
+body.home-MIL { --team-primary: #12284B; }
+body.home-MIN { --team-primary: #002B5C; }
+body.home-NYM { --team-primary: #FF5910; }
+body.home-NYY { --team-primary: #0C2340; }
+body.home-OAK, body.home-ATH { --team-primary: #003831; }
+body.home-PHI { --team-primary: #E81828; }
+body.home-PIT { --team-primary: #FDB827; }
+body.home-SD  { --team-primary: #2F241D; }
+body.home-SF  { --team-primary: #FD5A1E; }
+body.home-SEA { --team-primary: #0C2C56; }
+body.home-STL { --team-primary: #C41E3A; }
+body.home-TB  { --team-primary: #092C5C; }
+body.home-TEX { --team-primary: #003278; }
+body.home-TOR { --team-primary: #134A8E; }
+body.home-WSH { --team-primary: #AB0003; }
+
+/* INDEX and other non-game pages wear the site's home-team colors (SF Giants). */
+body.index, body.fun {
+  --team-primary:   #FD5A1E;
+  --team-secondary: #27251F;
+}
+
+/* --- Headings pick up the active palette --- */
+body h1 {
+  color: var(--team-primary);
+  border-bottom: 3px double var(--team-primary);
+  padding-bottom: 0.35rem;
+}
+body h2 {
+  color: var(--team-primary);
+  border-bottom: 1px solid var(--team-primary);
+  padding-bottom: 0.2rem;
+}
+body h3 {
+  color: var(--team-secondary);
+}
+
+/* --- Attended blockquote (and any blockquote) — tinted with team accent --- */
+body blockquote {
+  background: var(--tint);
+  border-left: 4px solid var(--team-primary);
+  padding: 0.6rem 1rem;
+  margin-left: 0;
+  border-radius: 2px;
+}
+
+/* --- Tables: team-colored headers, zebra stripes, hover --- */
+body table {
+  border-collapse: collapse;
+  width: 100%;
+}
+body table th {
+  background: var(--team-primary);
+  color: #fff;
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.55rem;
+}
+body table tbody tr:nth-child(even) td {
+  background: var(--zebra);
+}
+body table tbody tr:hover td {
+  background: var(--hover);
+}
+body table td {
+  padding: 0.3rem 0.55rem;
+  border-bottom: 1px solid #e5dfd0;
+}
+
+/* --- Links follow the team accent --- */
+body a {
+  color: var(--team-primary);
+}
+body a:hover {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+}
+
+/* --- Horizontal rules become subtle team rules --- */
+body hr {
+  border: 0;
+  border-top: 1px solid var(--team-primary);
+  opacity: 0.5;
+  margin: 1.6rem 0;
+}
+
+/* --- Tighter bullet spacing for Statcast dumps --- */
+body ul li { margin: 0.12rem 0; }
+
+/* ============================================================================
+ * SITE NAV (injected by /nav.js on the hosted site; rules here wait for it)
+ * ========================================================================== */
+nav.site-nav {
+  background: var(--team-primary);
+  color: #fff;
+  margin: -2.5rem -1.2rem 2rem;
+  padding: 0.6rem 1.2rem;
+  box-shadow: 0 2px 0 rgba(0,0,0,0.08);
+  font-family: Georgia, "Times New Roman", serif;
+}
+nav.site-nav .site-nav-inner {
+  max-width: 42rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+nav.site-nav a {
+  color: #fff;
+  text-decoration: none;
+  border: none;
+}
+nav.site-nav .site-nav-brand {
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  font-size: 0.95rem;
+  opacity: 0.92;
+}
+nav.site-nav .site-nav-brand:hover { opacity: 1; }
+nav.site-nav ul.site-nav-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 1.2rem;
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  font-size: 0.9rem;
+}
+nav.site-nav ul.site-nav-links li { margin: 0; }
+nav.site-nav ul.site-nav-links a {
+  padding: 0.1rem 0;
+  border-bottom: 2px solid transparent;
+  opacity: 0.82;
+}
+nav.site-nav ul.site-nav-links a:hover {
+  opacity: 1;
+  border-bottom-color: rgba(255,255,255,0.7);
+}
+nav.site-nav ul.site-nav-links a[aria-current="page"] {
+  opacity: 1;
+  border-bottom-color: #fff;
+  font-weight: 700;
+}
+
+@media (max-width: 36rem) {
+  nav.site-nav { margin: -2.5rem -0.6rem 1.2rem; padding: 0.5rem 0.8rem; }
+  nav.site-nav .site-nav-brand { font-size: 0.85rem; }
+  nav.site-nav ul.site-nav-links { gap: 0.8rem; font-size: 0.8rem; }
+}

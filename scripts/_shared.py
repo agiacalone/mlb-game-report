@@ -222,8 +222,9 @@ GAME_FIELDS = [
     "gamePk", "date", "game_type", "status", "venue", "venue_id", "city", "state",
     "lat", "lon", "elevation", "azimuth", "tz", "dayNight", "first_pitch",
     "sunrise", "sunset", "civil_twilight_end", "duration", "attendance", "weather",
-    "wind", "umpires", "away_team", "away_team_id", "away_team_short",
-    "home_team", "home_team_id", "home_team_short", "away_score", "home_score",
+    "wind", "umpires", "away_team", "away_team_id", "away_team_short", "away_abbr",
+    "home_team", "home_team_id", "home_team_short", "home_abbr",
+    "away_score", "home_score",
     "winning_pitcher", "losing_pitcher", "save_pitcher",
     "away_record", "home_record", "attended", "seat_section", "seat_row",
     "seat_number", "companions", "captivating_play_idx",
@@ -829,7 +830,11 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         if g.get("seat_row"):
             seat_parts.append(f"Row **{g['seat_row']}**")
         if g.get("seat_number"):
-            seat_parts.append(f"Seat **{g['seat_number']}**")
+            seat_val = str(g["seat_number"])
+            # Pluralize when the value names more than one seat (e.g. "1 & 2", "1,2", "1-3")
+            plural = any(c in seat_val for c in "&,+") or bool(re.search(r"\d+\s*-\s*\d+", seat_val))
+            label = "Seats" if plural else "Seat"
+            seat_parts.append(f"{label} **{seat_val}**")
         if seat_parts:
             seat_line = " · ".join(seat_parts)
         if g.get("companions"):
@@ -1020,6 +1025,10 @@ def rebuild_index(library: Path) -> None:
     for p in sorted(library.glob("*.md")):
         if p.name == "INDEX.md":
             continue
+        # Variant .md files (1930s radio-call transcripts etc.) are not games;
+        # they're surfaced as a separate column on the game's row.
+        if p.stem.endswith("-broadcast"):
+            continue
         txt = p.read_text().splitlines()
         if not txt or txt[0].strip() != "---":
             continue
@@ -1030,21 +1039,33 @@ def rebuild_index(library: Path) -> None:
             if ":" in ln:
                 k, v = ln.split(":", 1)
                 meta[k.strip()] = v.strip()
-        if meta:
-            meta["_file"] = p.name
-            entries.append(meta)
+        # Require a date so we don't accept stray non-game .md files.
+        if not meta.get("date"):
+            continue
+        meta["_file"] = p.name
+        entries.append(meta)
     entries.sort(key=lambda e: e.get("date", ""), reverse=True)
     lines = ["# Games Attended", "",
              f"*{len(entries)} game{'s' if len(entries) != 1 else ''} in the log.*", "",
-             "| Date | Matchup | Final | Venue | Notes |",
-             "|------|---------|-------|-------|-------|"]
+             "| Date | Matchup | Final | Venue | Broadcast | Notes |",
+             "|------|---------|-------|-------|-----------|-------|"]
     for e in entries:
         matchup = f"{e.get('away_team','?')} at {e.get('home_team','?')}"
         final = f"{e.get('home_team_short','?')} {e.get('final_home','?')}, {e.get('away_team_short','?')} {e.get('final_away','?')}"
         notes = e.get("seat", "")
+        stem = Path(e["_file"]).stem
         html_sibling = (library / e["_file"]).with_suffix(".html")
         link_target = html_sibling.name if html_sibling.exists() else e["_file"]
-        lines.append(f"| {e.get('date','')} | [{matchup}]({link_target}) | {final} | {e.get('venue','')} | {notes} |")
+        # Announcer broadcast column: link to <slug>-broadcast.html if present.
+        bcast_html = library / f"{stem}-broadcast.html"
+        bcast_md = library / f"{stem}-broadcast.md"
+        if bcast_html.exists():
+            bcast_cell = f"[1930s radio call]({bcast_html.name})"
+        elif bcast_md.exists():
+            bcast_cell = f"[1930s radio call]({bcast_md.name})"
+        else:
+            bcast_cell = "—"
+        lines.append(f"| {e.get('date','')} | [{matchup}]({link_target}) | {final} | {e.get('venue','')} | {bcast_cell} | {notes} |")
     idx_md = library / "INDEX.md"
     idx_md.write_text("\n".join(lines) + "\n")
     if any((library / e["_file"]).with_suffix(".html").exists() for e in entries):

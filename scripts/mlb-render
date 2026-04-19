@@ -51,7 +51,14 @@ def main() -> None:
 
     html_path = None
     if args.html or args.open:
-        html_path = render_html(out_path)
+        g = dataset["game"]
+        body_class_parts = []
+        if g.get("away_abbr"):
+            body_class_parts.append(f"away-{g['away_abbr']}")
+        if g.get("home_abbr"):
+            body_class_parts.append(f"home-{g['home_abbr']}")
+        body_class = " ".join(body_class_parts)
+        html_path = render_html(out_path, body_class=body_class)
         if html_path:
             print(f"Rendered {html_path}", file=sys.stderr)
 

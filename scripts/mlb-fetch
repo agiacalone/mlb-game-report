@@ -68,6 +68,11 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
     home_name = home["team"]["name"]
     away_short = short_name(away_name)
     home_short = short_name(home_name)
+    # 3-letter team abbreviations (LAA, SD, NYY, …) from the feed; used as
+    # body-class hooks for team-aware CSS palettes in the rendered HTML.
+    _feed_teams = feed.get("gameData", {}).get("teams", {}) or {}
+    away_abbr = (_feed_teams.get("away", {}) or {}).get("abbreviation", "") or ""
+    home_abbr = (_feed_teams.get("home", {}) or {}).get("abbreviation", "") or ""
 
     decisions = feed["liveData"].get("decisions", {}) or {}
     wp = decisions.get("winner", {}).get("fullName", "") or ""
@@ -273,9 +278,11 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         "away_team": away_name,
         "away_team_id": away["team"]["id"],
         "away_team_short": away_short,
+        "away_abbr": away_abbr,
         "home_team": home_name,
         "home_team_id": home["team"]["id"],
         "home_team_short": home_short,
+        "home_abbr": home_abbr,
         "away_score": away.get("score", 0),
         "home_score": home.get("score", 0),
         "winning_pitcher": wp,
