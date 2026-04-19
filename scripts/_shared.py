@@ -627,13 +627,30 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     lp = g.get("losing_pitcher") or ""
     sv = g.get("save_pitcher") or ""
 
-    # Headline + subhead. Use "WINNER N, LOSER M" (AP/newspaper style) instead
-    # of a hyphen score — the hyphen form reads as away–home in baseball and
-    # gives the wrong impression when the home team wins.
+    # Headline verb varies by margin to avoid repetition across a series.
+    # Score is always away-home (baseball convention). Verb is picked
+    # deterministically from gamePk hash so the same game always gets the
+    # same verb (no surprises on re-render).
+    margin = w_score - l_score
+    SHUTOUT_VERBS = ["BLANK", "SHUT OUT", "WHITEWASH", "SILENCE", "SMOTHER"]
+    CLOSE_VERBS = ["EDGE", "NIP", "CLIP", "TOP", "SLIP PAST", "OUTLAST"]              # 1–2 runs
+    SOLID_VERBS = ["TOP", "BEAT", "DOWNS", "BEST", "HANDLE", "DEFEAT", "OUTSCORE"]    # 3–5 runs
+    ROUT_VERBS  = ["ROUT", "MAUL", "POUND", "HAMMER", "CRUSH", "TROUNCE",
+                   "BATTER", "BULLY", "LEVEL", "SHELLAC"]                             # 6+ runs
     if l_score == 0:
-        headline = f"{winner_short.upper()} BLANK {loser_short.upper()}, {l_score}-{w_score}"
+        pool = SHUTOUT_VERBS
+    elif margin <= 2:
+        pool = CLOSE_VERBS
+    elif margin <= 5:
+        pool = SOLID_VERBS
     else:
-        headline = f"{winner_short.upper()} TOP {loser_short.upper()}, {l_score}-{w_score}"
+        pool = ROUT_VERBS
+    try:
+        seed = int(g.get("gamePk") or 0)
+    except (TypeError, ValueError):
+        seed = 0
+    verb = pool[seed % len(pool)]
+    headline = f"{winner_short.upper()} {verb} {loser_short.upper()}, {away_r}-{home_r}"
 
     w_side_short = winner_short
     tops = _top_batters(batting, w_side_short, 1)
@@ -1075,8 +1092,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
             a = int(pl.get("away_score_after") or 0)
             h = int(pl.get("home_score_after") or 0)
 
-            if last_pitcher and pitcher != last_pitcher:
-                items.append(f"    *— Pitching change: {last_pitcher} → {pitcher}. —*")
+            pitcher_changed = bool(last_pitcher) and pitcher != last_pitcher
+            if pitcher_changed:
+                items.append(
+                    f'    <span class="pitching-change">🔄 <strong>Pitching change:</strong> '
+                    f'{last_pitcher} → {pitcher}</span>'
+                )
+            first_pa_for_pitcher = (last_pitcher is None) or pitcher_changed
             last_pitcher = pitcher
 
             event_marker = "⚾ " if event == "Home Run" else ""
@@ -1087,7 +1109,11 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
             # Anchor for SCORING-table deep links (#play-N).
             play_idx = pl.get("idx")
             anchor = f'<a id="play-{play_idx}"></a>' if play_idx is not None else ""
-            row = f"{i}. {anchor}{tag_prefix}{event_marker}**{batter}** vs. {pitcher} — {desc}"
+            # Only show "vs. <pitcher>" on the first batter against a pitcher
+            # within the half-inning (or after a pitching change); subsequent
+            # PAs against the same pitcher drop the redundant annotation.
+            matchup = f" vs. {pitcher}" if first_pa_for_pitcher else ""
+            row = f"{i}. {anchor}{tag_prefix}{event_marker}**{batter}**{matchup} — {desc}"
             if scored:
                 row += f" **[{away_short} {a}, {home_short} {h}]**"
             row += f" · {count_bit}"

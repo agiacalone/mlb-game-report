@@ -334,6 +334,7 @@ body.index h1 { font-size: 2rem; }
   --color-MIN: #002B5C;
   --color-NYM: #FF5910;
   --color-NYY: #0C2340;
+  --color-NYG: #27251F;  /* Historical NY Giants (1883–1957); black + orange, same as modern SF */
   --color-OAK: #003831;  --color-ATH: #003831;
   --color-PHI: #E81828;
   --color-PIT: #FDB827;
@@ -371,6 +372,7 @@ body.home-MIL, section.team-MIL, .team-badge.team-MIL { --team-primary: var(--co
 body.home-MIN, section.team-MIN, .team-badge.team-MIN { --team-primary: var(--color-MIN); --team-fg: #fff; }
 body.home-NYM, section.team-NYM, .team-badge.team-NYM { --team-primary: var(--color-NYM); --team-fg: #fff; }
 body.home-NYY, section.team-NYY, .team-badge.team-NYY { --team-primary: var(--color-NYY); --team-fg: #fff; }
+body.home-NYG, section.team-NYG, .team-badge.team-NYG { --team-primary: var(--color-NYG); --team-fg: #FD5A1E; }
 body.home-OAK, body.home-ATH, section.team-OAK, section.team-ATH, .team-badge.team-OAK, .team-badge.team-ATH { --team-primary: var(--color-OAK); --team-fg: #fff; }
 body.home-PHI, section.team-PHI, .team-badge.team-PHI { --team-primary: var(--color-PHI); --team-fg: #fff; }
 /* PIT's primary is yellow — needs dark foreground for readability. */
@@ -404,6 +406,7 @@ body.away-MIL { --team-secondary: var(--color-MIL); }
 body.away-MIN { --team-secondary: var(--color-MIN); }
 body.away-NYM { --team-secondary: var(--color-NYM); }
 body.away-NYY { --team-secondary: var(--color-NYY); }
+body.away-NYG { --team-secondary: var(--color-NYG); }
 body.away-OAK, body.away-ATH { --team-secondary: var(--color-OAK); }
 body.away-PHI { --team-secondary: var(--color-PHI); }
 body.away-PIT { --team-secondary: var(--color-PIT); }
@@ -813,4 +816,21 @@ p.records {
 p.records strong { color: var(--ink); font-weight: 700; }
 @media (prefers-color-scheme: dark) {
   p.records strong { color: #eee; }
+}
+
+/* Pitching change — stand-out banner inside the PBP ol list */
+.pitching-change {
+  display: block;
+  margin: 0.4em 0 0.5em -0.4em;
+  padding: 0.25em 0.6em;
+  font-size: 0.88em;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  background: rgba(122, 23, 23, 0.08);
+  border-left: 3px solid var(--accent);
+  color: var(--ink);
+}
+.pitching-change strong { font-weight: 700; letter-spacing: 0.04em; }
+@media (prefers-color-scheme: dark) {
+  .pitching-change { background: rgba(217, 84, 68, 0.12); }
 }

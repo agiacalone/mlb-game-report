@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Generate a series-level stats recap from a directory of datasets.
+
+Aggregates batting + pitching across every game in the directory,
+builds a BR-style recap page (headline, series line score, per-team
+batting/pitching totals, per-game linescore grid, top performers).
+Uses the same newspaper.css theming as the single-game reports.
+
+Usage: series-recap <series-dir> [--title "1936 World Series"] [--out DIR]
+"""
+import argparse, csv, re
+from collections import defaultdict
+from pathlib import Path
+import sys
+
+ap = argparse.ArgumentParser()
+ap.add_argument("series_dir", help="Directory containing multiple <gameslug>/ dataset dirs")
+ap.add_argument("--title", default=None, help="Series title (e.g. '1936 World Series')")
+ap.add_argument("--out", default=None, help="Output .md path (default: <series>/INDEX.md — the series landing page)")
+args = ap.parse_args()
+
+SERIES = Path(args.series_dir).resolve()
+TITLE = args.title or SERIES.name.replace("-", " ").title()
+OUT = Path(args.out) if args.out else SERIES / "INDEX.md"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shared import render_html, CSS_FILE
+
+# Gather datasets
+datasets = sorted([p for p in SERIES.iterdir() if p.is_dir() and (p / "game.csv").exists()])
+if not datasets:
+    sys.exit(f"no datasets found under {SERIES}")
+
+games = []
+for ds in datasets:
+    game = next(csv.DictReader((ds / "game.csv").open()))
+    games.append({
+        "dir": ds,
+        "slug": ds.name,
+        "game": game,
+        "batting": list(csv.DictReader((ds / "batting.csv").open())),
+        "pitching": list(csv.DictReader((ds / "pitching.csv").open())),
+        "linescore": list(csv.DictReader((ds / "linescore.csv").open())),
+    })
+
+games.sort(key=lambda g: g["game"]["date"])
+
+# --- Per-team series totals (batting + pitching) --------------------------
+team_bat = defaultdict(lambda: defaultdict(int))   # team -> stat -> total
+team_bat_players = defaultdict(dict)               # team -> player -> dict of cumulative
+team_pit_players = defaultdict(dict)
+team_wins = defaultdict(int)
+
+def to_int(x):
+    try: return int(x or 0)
+    except ValueError: return 0
+def to_float(x):
+    try: return float(x or 0)
+    except ValueError: return 0.0
+
+def fmt_ip(outs):
+    whole, frac = divmod(outs, 3)
+    return f"{whole}.{frac}" if frac else f"{whole}.0"
+
+for g in games:
+    gm = g["game"]
+    aw_s, hm_s = gm["away_team_short"], gm["home_team_short"]
+    if to_int(gm["home_score"]) > to_int(gm["away_score"]):
+        team_wins[hm_s] += 1
+    else:
+        team_wins[aw_s] += 1
+    for b in g["batting"]:
+        t = b["team"]; pname = b["name"]
+        slot = team_bat_players[t].setdefault(pname, {"name": pname, "ab":0,"r":0,"h":0,"rbi":0,"bb":0,"k":0,"hr":0,"games":0})
+        slot["ab"] += to_int(b.get("ab"))
+        slot["r"] += to_int(b.get("r"))
+        slot["h"] += to_int(b.get("h"))
+        slot["rbi"] += to_int(b.get("rbi"))
+        slot["bb"] += to_int(b.get("bb"))
+        slot["k"] += to_int(b.get("k"))
+        slot["hr"] += to_int(b.get("hr"))
+        slot["games"] += 1
+        team_bat[t]["ab"] += to_int(b.get("ab"))
+        team_bat[t]["r"]  += to_int(b.get("r"))
+        team_bat[t]["h"]  += to_int(b.get("h"))
+        team_bat[t]["rbi"] += to_int(b.get("rbi"))
+        team_bat[t]["bb"] += to_int(b.get("bb"))
+        team_bat[t]["k"]  += to_int(b.get("k"))
+        team_bat[t]["hr"] += to_int(b.get("hr"))
+    for p in g["pitching"]:
+        t = p["team"]; pname = p["name"]
+        slot = team_pit_players[t].setdefault(pname, {"name": pname, "g":0,"w":0,"l":0,"s":0,"ip_outs":0,"h":0,"r":0,"er":0,"bb":0,"k":0,"hr":0})
+        slot["g"] += 1
+        dec = (p.get("decision") or "").strip()
+        if dec == "W": slot["w"] += 1
+        if dec == "L": slot["l"] += 1
+        if dec == "S": slot["s"] += 1
+        ip = p.get("ip") or "0"
+        if "." in ip:
+            whole, frac = ip.split(".")
+            slot["ip_outs"] += to_int(whole)*3 + to_int(frac)
+        else:
+            slot["ip_outs"] += to_int(ip)*3
+        slot["h"]  += to_int(p.get("h"))
+        slot["r"]  += to_int(p.get("r"))
+        slot["er"] += to_int(p.get("er"))
+        slot["bb"] += to_int(p.get("bb"))
+        slot["k"]  += to_int(p.get("k"))
+        slot["hr"] += to_int(p.get("hr"))
+
+teams = list(team_bat.keys())
+away_team_id = games[0]["game"]["away_team_short"]
+home_team_id = games[0]["game"]["home_team_short"]
+# Identify the two franchises (they may swap home/away per game).
+franchise_a = games[0]["game"]["away_team_short"]  # road team in game 1
+franchise_b = games[0]["game"]["home_team_short"]  # home team in game 1
+
+winner = max(team_wins.items(), key=lambda kv: kv[1])[0]
+loser = [t for t in teams if t != winner][0]
+w_wins = team_wins[winner]; l_wins = team_wins[loser]
+
+# Team abbr for palette (from any game where this team appears)
+abbr_of = {}
+for g in games:
+    abbr_of[g["game"]["away_team_short"]] = g["game"]["away_abbr"]
+    abbr_of[g["game"]["home_team_short"]] = g["game"]["home_abbr"]
+
+def team_pill(t):
+    a = abbr_of.get(t, "")
+    return f'<span class="team-badge team-{a}">{a}</span>' if a else t
+
+# --- Markdown compose -----------------------------------------------------
+lines = []
+lines.append(f"""---
+title: {TITLE} — Recap
+series_winner: {winner}
+series_record: {w_wins}–{l_wins}
+---
+
+# {TITLE.upper()} — {winner.upper()} WIN, {w_wins}–{l_wins}
+### *Series statistical recap — batting, pitching, and game-by-game totals*
+
+<p class="external-refs">Also at: <a href="https://www.baseball-reference.com/postseason/{SERIES.name.split('-')[0]}_WS.shtml">Baseball-Reference</a></p>
+
+**SERIES.** {winner} defeated {loser}, {w_wins} games to {l_wins}, in the {TITLE}.
+""")
+
+# --- Game-by-game linescore grid ------------------------------------------
+lines.append("## GAMES\n")
+lines.append(f"| # | Date | Matchup | Final | Venue | Log | Broadcast |")
+lines.append("|---|------|---------|-------|-------|-----|-----------|")
+for i, g in enumerate(games, 1):
+    gm = g["game"]
+    date = gm["date"]
+    aw = gm["away_team_short"]; hm = gm["home_team_short"]
+    ar = gm["away_score"]; hr = gm["home_score"]
+    venue = gm["venue"]
+    slug = g["slug"]
+    log_link = f"[log]({slug}.html)"
+    bcast_html = SERIES / f"{slug}-broadcast.html"
+    bcast_link = f"[radio call]({slug}-broadcast.html)" if bcast_html.exists() else "—"
+    matchup = f"{team_pill(aw)} {aw} at {team_pill(hm)} {hm}"
+    final = f"{hm if to_int(hr) > to_int(ar) else aw} {max(to_int(ar), to_int(hr))}, {aw if to_int(hr) > to_int(ar) else hm} {min(to_int(ar), to_int(hr))}"
+    lines.append(f"| {i} | {date} | {matchup} | {final} | {venue} | {log_link} | {bcast_link} |")
+
+# --- Series batting totals ------------------------------------------------
+lines.append("\n## SERIES BATTING\n")
+lines.append('<div class="twocol boxes">\n')
+for t in (winner, loser):
+    a = abbr_of.get(t, "")
+    pill = team_pill(t)
+    lines.append(f'<section class="team-{a}">\n')
+    lines.append(f"**{pill} {t}** — series totals\n\n")
+    players = sorted(team_bat_players[t].values(),
+                     key=lambda p: (-(p["h"]), -(p["hr"]), -(p["rbi"]), p["name"]))
+    lines.append("| Player | G | AB | R | H | 2B* | HR | RBI | BB | K | AVG |")
+    lines.append("|--------|---|----|---|---|-----|----|-----|----|---|-----|")
+    for p in players:
+        if p["ab"] == 0 and p["bb"] == 0:
+            continue
+        avg = (lambda v: f"{v:.3f}" if v >= 1 else f".{int(round(v*1000)):03d}")(p['h']/p['ab']) if p["ab"] > 0 else ".—"
+        lines.append(f"| {p['name']} | {p['games']} | {p['ab']} | {p['r']} | {p['h']} | — | {p['hr']} | {p['rbi']} | {p['bb']} | {p['k']} | {avg} |")
+    tb = team_bat[t]
+    avg = (lambda v: f"{v:.3f}" if v >= 1 else f".{int(round(v*1000)):03d}")(tb['h']/tb['ab']) if tb["ab"] > 0 else ".—"
+    lines.append(f"| **Team** | — | **{tb['ab']}** | **{tb['r']}** | **{tb['h']}** | — | **{tb['hr']}** | **{tb['rbi']}** | **{tb['bb']}** | **{tb['k']}** | **{avg}** |")
+    lines.append("\n</section>\n")
+lines.append("\n</div>\n")
+
+# --- Series pitching totals -----------------------------------------------
+lines.append("\n## SERIES PITCHING\n")
+lines.append('<div class="twocol boxes">\n')
+for t in (winner, loser):
+    a = abbr_of.get(t, "")
+    pill = team_pill(t)
+    lines.append(f'<section class="team-{a}">\n')
+    lines.append(f"**{pill} {t}** — series totals\n\n")
+    players = sorted(team_pit_players[t].values(),
+                     key=lambda p: (-(p["ip_outs"]), p["name"]))
+    lines.append("| Pitcher | G | W | L | SV | IP | H | R | ER | BB | K | HR | ERA |")
+    lines.append("|---------|---|---|---|----|----|---|---|----|----|---|----|-----|")
+    team_outs = team_er = 0
+    for p in players:
+        ip = fmt_ip(p["ip_outs"])
+        era = f"{p['er']*27/p['ip_outs']:.2f}" if p["ip_outs"] > 0 else "—"
+        lines.append(f"| {p['name']} | {p['g']} | {p['w']} | {p['l']} | {p['s']} | {ip} | {p['h']} | {p['r']} | {p['er']} | {p['bb']} | {p['k']} | {p['hr']} | {era} |")
+        team_outs += p["ip_outs"]; team_er += p["er"]
+    team_era = f"{team_er*27/team_outs:.2f}" if team_outs > 0 else "—"
+    lines.append(f"| **Team** | — | — | — | — | **{fmt_ip(team_outs)}** | — | — | **{team_er}** | — | — | — | **{team_era}** |")
+    lines.append("\n</section>\n")
+lines.append("\n</div>\n")
+
+# --- Series line (aggregate R/H/E) ---------------------------------------
+lines.append("\n## SERIES TOTALS\n")
+lines.append(f"""| Team | G | R | H | HR | AVG | ERA |
+|------|---|---|---|----|-----|-----|""")
+for t in (winner, loser):
+    tb = team_bat[t]
+    avg = (lambda v: f"{v:.3f}" if v >= 1 else f".{int(round(v*1000)):03d}")(tb['h']/tb['ab']) if tb["ab"] > 0 else ".—"
+    total_outs = sum(p["ip_outs"] for p in team_pit_players[t].values())
+    total_er = sum(p["er"] for p in team_pit_players[t].values())
+    era = f"{total_er*27/total_outs:.2f}" if total_outs > 0 else "—"
+    lines.append(f"| {team_pill(t)} {t} | {len(games)} | {tb['r']} | {tb['h']} | {tb['hr']} | {avg} | {era} |")
+
+# --- Top performers -------------------------------------------------------
+lines.append("\n## TOP PERFORMERS\n")
+lines.append('<div class="twocol">\n<section>\n')
+lines.append("**Batting leaders**\n\n")
+all_bat = []
+for t, ps in team_bat_players.items():
+    for p in ps.values():
+        if p["ab"] >= 10:
+            p["_team"] = t; p["_avg"] = p["h"]/p["ab"] if p["ab"] else 0
+            all_bat.append(p)
+by_hits = sorted(all_bat, key=lambda p: -p["h"])[:5]
+by_rbi = sorted(all_bat, key=lambda p: -p["rbi"])[:5]
+by_hr = sorted(all_bat, key=lambda p: -p["hr"])[:5]
+def fmt_player(p):
+    a = abbr_of.get(p["_team"], "")
+    pill = f'<span class="team-badge team-{a}">{a}</span>' if a else p["_team"]
+    return f"{pill} {p['name']}"
+lines.append("_Hits:_ " + " · ".join(f"{fmt_player(p)} ({p['h']})" for p in by_hits) + "\n\n")
+lines.append("_RBI:_ " + " · ".join(f"{fmt_player(p)} ({p['rbi']})" for p in by_rbi) + "\n\n")
+lines.append("_HR:_ " + " · ".join(f"{fmt_player(p)} ({p['hr']})" for p in by_hr if p['hr']>0) + "\n\n")
+lines.append("</section>\n<section>\n")
+lines.append("**Pitching leaders**\n\n")
+all_pit = []
+for t, ps in team_pit_players.items():
+    for p in ps.values():
+        if p["ip_outs"] >= 9:
+            p["_team"] = t
+            all_pit.append(p)
+by_ip = sorted(all_pit, key=lambda p: -p["ip_outs"])[:5]
+by_k = sorted(all_pit, key=lambda p: -p["k"])[:5]
+by_era = sorted([p for p in all_pit if p["ip_outs"] >= 9], key=lambda p: p["er"]*27/p["ip_outs"] if p["ip_outs"] else 99)[:5]
+def fmt_pit(p):
+    a = abbr_of.get(p["_team"], "")
+    pill = f'<span class="team-badge team-{a}">{a}</span>' if a else p["_team"]
+    return f"{pill} {p['name']}"
+lines.append("_IP:_ " + " · ".join(f"{fmt_pit(p)} ({fmt_ip(p['ip_outs'])})" for p in by_ip) + "\n\n")
+lines.append("_K:_ " + " · ".join(f"{fmt_pit(p)} ({p['k']})" for p in by_k) + "\n\n")
+lines.append("_ERA:_ " + " · ".join(f"{fmt_pit(p)} ({p['er']*27/p['ip_outs']:.2f})" for p in by_era) + "\n\n")
+lines.append("</section>\n</div>\n")
+
+lines.append(f"\n---\n\n*Series recap generated from {len(games)} game datasets (MLB Stats API). All totals aggregated from per-game batting.csv / pitching.csv. Game-by-game logs and broadcasts link out of the table above.*\n")
+
+OUT.write_text("\n".join(lines))
+print(f"wrote {OUT}")
+
+# Render HTML via the shared renderer (picks up the inline newspaper.css).
+html_path = render_html(OUT, body_class="index")
+if html_path:
+    print(f"rendered {html_path}")
