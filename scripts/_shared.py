@@ -145,14 +145,24 @@ NOTABLE_KEYS = ["WP", "PB", "Balk", "HBP", "IBB", "SB", "CS", "E", "DP",
 # the ones that differ. Used only to construct deep-links to BR boxscores —
 # we do NOT fetch or scrape anything from BR.
 BR_ABBR: dict[str, str] = {
-    "LAA": "ANA",  # Angels in BR are "ANA" (Anaheim)
-    "SD":  "SDP",
-    "SF":  "SFG",
-    "TB":  "TBR",
-    "KC":  "KCR",
-    "WSH": "WSN",
-    "CWS": "CHW",
-    "ATH": "OAK",
+    # Baseball-Reference /boxes/ uses Retrosheet FRANCHISE codes, which differ from
+    # bref team-page codes. Verified against retrosheet.org/CurrentNames.csv (2026-05-22).
+    # Overrides only; everything else is identity (ARI, ATL, BAL, BOS, CIN, CLE, COL,
+    # DET, HOU, MIA, MIL, MIN, PHI, PIT, SEA, TEX, TOR).
+    "LAA": "ANA",  # Angels   (Anaheim)
+    "LAD": "LAN",  # Dodgers  (LA NL)
+    "SF":  "SFN",  # Giants   (SF NL)
+    "SD":  "SDN",  # Padres   (SD NL)
+    "TB":  "TBA",  # Rays     (Tampa Bay AL)
+    "KC":  "KCA",  # Royals   (KC AL)
+    "WSH": "WAS",  # Nationals
+    "CWS": "CHA",  # White Sox (Chicago AL)
+    "CHC": "CHN",  # Cubs      (Chicago NL)
+    "NYM": "NYN",  # Mets      (NY NL)
+    "NYY": "NYA",  # Yankees   (NY AL)
+    "STL": "SLN",  # Cardinals (St. Louis NL)
+    "ATH": "OAK",  # Athletics
+    "OAK": "OAK",
 }
 
 
@@ -402,7 +412,29 @@ PLAY_FIELDS = ["idx", "inning", "half", "batter", "batter_id", "pitcher",
                "wp_home", "wp_away", "wpa_home", "leverage_index"]
 PITCH_FIELDS = ["play_idx", "pitch_num", "type_code", "type_desc", "speed_mph",
                 "spin_rpm", "call", "px", "pz", "ev_mph", "la_deg",
-                "distance_ft", "trajectory", "hit_location", "hardness"]
+                "distance_ft", "trajectory", "hit_location", "hardness",
+                # Movement profile (from pitchData.breaks / extension) — the
+                # "in-payload deep dive" Statcast columns. ivb = induced
+                # vertical break (inches), hb = horizontal break (inches),
+                # spin_dir = spin-axis clock degrees, ext_ft = release extension.
+                "ivb_in", "hb_in", "spin_dir", "ext_ft",
+                # Gameday hit-chart landing coordinates (coordX/coordY, same
+                # frame as Savant hc_x/hc_y). Powers the fallback spray chart
+                # when Baseball Savant is unreachable.
+                "hit_x", "hit_y"]
+
+# Per-batted-ball Statcast table, primarily sourced from Baseball Savant's
+# game feed (gf endpoint) which carries expected stats + bat tracking that the
+# MLB Stats API does not expose. Falls back to feed/live hitData (no xBA / bat
+# speed) when Savant is unreachable — see build_statcast() in mlb-fetch. One row
+# per ball in play.
+STATCAST_FIELDS = ["play_idx", "ab_number", "inning", "half", "team_id",
+                   "batter", "batter_id", "stand", "pitcher", "p_throws",
+                   "pitch_name", "pitch_mph", "spin_rpm",
+                   "result", "description",
+                   "ev_mph", "la_deg", "distance_ft",
+                   "xba", "is_barrel", "bat_speed",
+                   "hc_x", "hc_y", "source"]
 
 
 def write_dataset(dirpath: Path, dataset: dict) -> None:
@@ -414,6 +446,8 @@ def write_dataset(dirpath: Path, dataset: dict) -> None:
     write_csv(dirpath / "plays.csv", PLAY_FIELDS, dataset["plays"])
     if dataset.get("pitches"):
         write_csv(dirpath / "pitches.csv", PITCH_FIELDS, dataset["pitches"])
+    if dataset.get("statcast"):
+        write_csv(dirpath / "statcast.csv", STATCAST_FIELDS, dataset["statcast"])
 
 
 def read_dataset(dirpath: Path) -> dict:
@@ -427,6 +461,7 @@ def read_dataset(dirpath: Path) -> dict:
         "pitching": read_csv(dirpath / "pitching.csv"),
         "plays": read_csv(dirpath / "plays.csv"),
         "pitches": read_csv(dirpath / "pitches.csv"),
+        "statcast": read_csv(dirpath / "statcast.csv") if (dirpath / "statcast.csv").exists() else [],
         "_dir": dirpath,
     }
 
@@ -573,11 +608,11 @@ def weather_glyph(weather: str) -> str:
     if "snow" in w:
         return "\u2744"  # ❄
     if "drizzle" in w:
-        return "\U0001f326"  # 🌦
+        return "☂"  # ☂
     if "rain" in w or "shower" in w:
-        return "\U0001f327"  # 🌧
+        return "☂"  # ☂
     if "fog" in w or "mist" in w:
-        return "\U0001f32b"  # 🌫
+        return "≈"  # ≈
     if "partly cloudy" in w:
         return "\u26c5"  # ⛅
     if "cloud" in w or "overcast" in w:
@@ -585,6 +620,456 @@ def weather_glyph(weather: str) -> str:
     if "clear" in w or "sunny" in w or "fair" in w:
         return "\u2600"  # ☀
     return "\u2022"  # •
+
+
+# --- Statcast charts (inline SVG, newsprint-clipping aesthetic) -------------
+#
+# Every chart is a self-contained <svg> carrying its own cream "newsprint"
+# background, so it reads identically as a pasted clipping inside a dark
+# Obsidian note and on the light newspaper HTML page. Two-ink palette (black
+# + press-red) in homage to a two-colour press run; agate labels; engraved
+# hairlines. The xBA ramp is the one place colour does analytic work.
+
+SC_PAPER = "#f3efe2"      # newsprint cream
+SC_INK = "#1c1a17"        # press black
+SC_HAIR = "#cdc3a6"       # faint engraving hairline
+SC_HAIR2 = "#9b8f70"      # stronger hairline
+SC_MUTE = "#6f6650"       # agate label ink
+SC_RED = "#a8322d"        # second-ink (press red)
+SC_DIRT = "#e7dcc2"       # infield dirt fill
+SC_GRASS = "#eae7d2"      # outfield fill
+
+# Categorical ink set for pitch families on the movement plot.
+SC_CAT = {
+    "fastball": "#a8322d",   # red
+    "breaking": "#2f4858",   # slate
+    "offspeed": "#b6862c",   # gold
+    "other": SC_MUTE,
+}
+_PITCH_FAMILY = {
+    "FF": "fastball", "FA": "fastball", "FT": "fastball", "FC": "fastball",
+    "SI": "fastball", "FS": "offspeed", "FO": "offspeed", "CH": "offspeed",
+    "SC": "offspeed", "SL": "breaking", "ST": "breaking", "SV": "breaking",
+    "CU": "breaking", "KC": "breaking", "CS": "breaking", "KN": "other",
+    "EP": "offspeed",
+}
+
+
+def _num(v, default=None):
+    """Lenient float cast for CSV string cells (handles '', '.970', None)."""
+    if v in (None, "", "null"):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_hit(result: str) -> bool:
+    return (result or "").strip().lower() in {
+        "single", "double", "triple", "home run"}
+
+
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes"}
+
+
+def _xba_color(xba) -> str:
+    """Sequential ramp: faint grey ink (sure out) → press red (sure hit).
+
+    Three stops through a warm ochre mid so the ramp reads on cream without a
+    legend. Returns a neutral when xBA is absent (Savant-down fallback)."""
+    v = _num(xba)
+    if v is None:
+        return "#b3a786"
+    v = max(0.0, min(1.0, v))
+    stops = [(0.0, (206, 197, 172)), (0.5, (199, 132, 56)), (1.0, (168, 50, 45))]
+    for i in range(len(stops) - 1):
+        a_t, a_c = stops[i]
+        b_t, b_c = stops[i + 1]
+        if v <= b_t:
+            f = 0 if b_t == a_t else (v - a_t) / (b_t - a_t)
+            r = round(a_c[0] + (b_c[0] - a_c[0]) * f)
+            g = round(a_c[1] + (b_c[1] - a_c[1]) * f)
+            b = round(a_c[2] + (b_c[2] - a_c[2]) * f)
+            return f"#{r:02x}{g:02x}{b:02x}"
+    return "#a8322d"
+
+
+def _svg_open(w: int, h: int, vb_w: int, vb_h: int, cls: str) -> list[str]:
+    """Start an SVG with the newsprint card backing + a thin engraved frame."""
+    return [
+        f'<svg class="sc-chart {cls}" viewBox="0 0 {vb_w} {vb_h}" width="{w}" '
+        f'height="{h}" xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'style="max-width:100%;height:auto;font-family:Georgia,\'Times New Roman\',serif;">',
+        f'<rect x="0" y="0" width="{vb_w}" height="{vb_h}" fill="{SC_PAPER}"/>',
+        f'<rect x="1.5" y="1.5" width="{vb_w-3}" height="{vb_h-3}" fill="none" '
+        f'stroke="{SC_HAIR2}" stroke-width="0.7"/>',
+    ]
+
+
+def _svg_title(s: list[str], vb_w: int, title: str, sub: str = "") -> None:
+    """Small-caps masthead + hairline rule across the top of a chart card."""
+    s.append(
+        f'<text x="{vb_w/2:.1f}" y="15" text-anchor="middle" fill="{SC_INK}" '
+        f'font-size="9.5" font-weight="700" letter-spacing="2.2" '
+        f'style="text-transform:uppercase;">{title}</text>')
+    if sub:
+        s.append(
+            f'<text x="{vb_w/2:.1f}" y="24.5" text-anchor="middle" fill="{SC_MUTE}" '
+            f'font-size="6.6" letter-spacing="0.6" font-style="italic">{sub}</text>')
+    yy = 30 if sub else 21
+    s.append(f'<line x1="14" y1="{yy}" x2="{vb_w-14}" y2="{yy}" stroke="{SC_HAIR2}" '
+             f'stroke-width="0.6"/>')
+
+
+# Gameday/Savant hit-chart frame: home plate ≈ (125.4, 198.3); x rises to the
+# right (LF→RF), y rises toward home (outfield is small-y). Geometry below is
+# derived from the 45° foul lines + a ~400-ft centre arc.
+_HOME = (125.4, 198.3)
+_LF_POLE = (33.0, 105.0)
+_RF_POLE = (218.0, 105.0)
+_CF = (125.4, 38.0)
+_BASES = {"1B": (151.0, 172.8), "2B": (125.4, 147.3), "3B": (99.8, 172.8)}
+_MOUND = (125.4, 174.1)
+
+
+def _svg_spray(statcast: list[dict], away_short: str, home_short: str,
+               away_id: str, home_id: str) -> str:
+    if not statcast:
+        return ""
+    VW, VH = 250, 224
+    s = _svg_open(420, 376, VW, VH, "sc-spray")
+    _svg_title(s, VW, "Spray Chart", "dot tint = expected batting avg on contact")
+    hx, hy = _HOME
+    lf, rf, cf = _LF_POLE, _RF_POLE, _CF
+    # Outfield grass fan (home → LF pole → CF arc → RF pole → home).
+    s.append(
+        f'<path d="M {hx} {hy} L {lf[0]} {lf[1]} '
+        f'Q {cf[0]-70} {cf[1]-14} {cf[0]} {cf[1]} '
+        f'Q {cf[0]+70} {cf[1]-14} {rf[0]} {rf[1]} Z" '
+        f'fill="{SC_GRASS}" stroke="{SC_HAIR2}" stroke-width="0.8"/>')
+    # Infield dirt (skin) — rounded square around the diamond.
+    b1, b2, b3 = _BASES["1B"], _BASES["2B"], _BASES["3B"]
+    s.append(
+        f'<path d="M {hx} {hy+2} L {b1[0]+9} {b1[1]} L {b2[0]} {b2[1]-9} '
+        f'L {b3[0]-9} {b3[1]} Z" fill="{SC_DIRT}" stroke="{SC_HAIR2}" '
+        f'stroke-width="0.6"/>')
+    # Foul lines.
+    for pole in (lf, rf):
+        s.append(f'<line x1="{hx}" y1="{hy}" x2="{pole[0]}" y2="{pole[1]}" '
+                 f'stroke="{SC_INK}" stroke-width="0.8"/>')
+    # Base-path diamond + bases.
+    s.append(f'<path d="M {hx} {hy} L {b1[0]} {b1[1]} L {b2[0]} {b2[1]} '
+             f'L {b3[0]} {b3[1]} Z" fill="none" stroke="{SC_INK}" stroke-width="0.7"/>')
+    for bx, by in (_BASES["1B"], _BASES["2B"], _BASES["3B"]):
+        s.append(f'<rect x="{bx-1.6:.1f}" y="{by-1.6:.1f}" width="3.2" height="3.2" '
+                 f'fill="{SC_PAPER}" stroke="{SC_INK}" stroke-width="0.6" '
+                 f'transform="rotate(45 {bx:.1f} {by:.1f})"/>')
+    s.append(f'<circle cx="{_MOUND[0]}" cy="{_MOUND[1]}" r="2" fill="none" '
+             f'stroke="{SC_INK}" stroke-width="0.6"/>')
+    # Distance arcs (engraved range rings at ~200 / 300 / 400 ft).
+    for ft, lbl in ((200, "200"), (300, "300"), (400, "400")):
+        ry = hy - ft / 2.495
+        s.append(f'<path d="M {lf[0]+6} {ry+12:.1f} Q {hx} {ry-10:.1f} '
+                 f'{rf[0]-6} {ry+12:.1f}" fill="none" stroke="{SC_HAIR}" '
+                 f'stroke-width="0.5" stroke-dasharray="2 3"/>')
+        s.append(f'<text x="{hx}" y="{ry+1:.1f}" text-anchor="middle" '
+                 f'fill="{SC_MUTE}" font-size="4.6">{lbl} ft</text>')
+    # Batted balls. Barrels ringed; HR dots sit on top.
+    pts = []
+    for r in statcast:
+        x, y = _num(r.get("hc_x")), _num(r.get("hc_y"))
+        if x is None or y is None:
+            continue
+        ev = _num(r.get("ev_mph")) or 0
+        rad = 1.8 + min(max((ev - 70) / 18.0, 0), 2.6)
+        col = _xba_color(r.get("xba"))
+        is_hr = (r.get("result") or "").strip().lower() == "home run"
+        is_brl = _truthy(r.get("is_barrel"))
+        pts.append((is_hr, is_brl, x, y, rad, col, r))
+    for is_hr, is_brl, x, y, rad, col, r in sorted(pts, key=lambda p: p[0]):
+        if is_brl:
+            s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{rad+1.7:.1f}" '
+                     f'fill="none" stroke="{SC_RED}" stroke-width="0.9"/>')
+        s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{rad:.1f}" fill="{col}" '
+                 f'stroke="{SC_INK}" stroke-width="0.45" opacity="0.95"/>')
+        if is_hr:
+            s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="0.9" fill="{SC_PAPER}"/>')
+    # Legend.
+    ly = VH - 9
+    s.append(f'<circle cx="20" cy="{ly}" r="2.4" fill="none" stroke="{SC_RED}" '
+             f'stroke-width="0.9"/>')
+    s.append(f'<text x="26" y="{ly+1.6:.0f}" fill="{SC_MUTE}" font-size="5.6">'
+             f'barrel</text>')
+    s.append(f'<circle cx="62" cy="{ly}" r="1.4" fill="{SC_PAPER}" stroke="{SC_INK}" '
+             f'stroke-width="0.5"/><circle cx="62" cy="{ly}" r="2.4" fill="none" '
+             f'stroke="{SC_INK}" stroke-width="0.45"/>')
+    s.append(f'<text x="68" y="{ly+1.6:.0f}" fill="{SC_MUTE}" font-size="5.6">'
+             f'home run</text>')
+    s.append(f'<text x="{VW-16}" y="{ly+1.6:.0f}" text-anchor="end" fill="{SC_MUTE}" '
+             f'font-size="5.2" font-style="italic">catcher\'s view · '
+             f'{len(pts)} balls in play</text>')
+    s.append("</svg>")
+    return "".join(s)
+
+
+def _svg_ev_la(statcast: list[dict]) -> str:
+    if not statcast:
+        return ""
+    VW, VH = 264, 208
+    PADL, PADR, PADT, PADB = 30, 12, 34, 24
+    s = _svg_open(440, 347, VW, VH, "sc-evla")
+    _svg_title(s, VW, "Exit Velocity × Launch Angle", "the barrel zone is the sweet spot")
+    x0, x1 = PADL, VW - PADR
+    y0, y1 = VH - PADB, PADT
+    la_lo, la_hi = -40, 60
+    ev_lo, ev_hi = 45, 122
+
+    def px(la):
+        return x0 + (la - la_lo) / (la_hi - la_lo) * (x1 - x0)
+
+    def py(ev):
+        return y0 + (ev - ev_lo) / (ev_hi - ev_lo) * (y1 - y0)
+
+    # Hard-hit (95 mph) band + sweet-spot (8–32°) column shading.
+    s.append(f'<rect x="{x0:.1f}" y="{py(ev_hi):.1f}" width="{x1-x0:.1f}" '
+             f'height="{py(95)-py(ev_hi):.1f}" fill="{SC_RED}" opacity="0.05"/>')
+    s.append(f'<rect x="{px(8):.1f}" y="{y1:.1f}" width="{px(32)-px(8):.1f}" '
+             f'height="{y0-y1:.1f}" fill="{SC_INK}" opacity="0.04"/>')
+    # Axes.
+    s.append(f'<line x1="{x0}" y1="{y0}" x2="{x1}" y2="{y0}" stroke="{SC_INK}" stroke-width="0.8"/>')
+    s.append(f'<line x1="{x0}" y1="{y0}" x2="{x0}" y2="{y1}" stroke="{SC_INK}" stroke-width="0.8"/>')
+    for ev in range(50, 121, 10):
+        yy = py(ev)
+        s.append(f'<line x1="{x0-2}" y1="{yy:.1f}" x2="{x0}" y2="{yy:.1f}" stroke="{SC_INK}" stroke-width="0.6"/>')
+        s.append(f'<line x1="{x0}" y1="{yy:.1f}" x2="{x1}" y2="{yy:.1f}" stroke="{SC_HAIR}" stroke-width="0.4"/>')
+        s.append(f'<text x="{x0-4}" y="{yy+1.8:.1f}" text-anchor="end" fill="{SC_MUTE}" font-size="5.4">{ev}</text>')
+    for la in range(-30, 61, 15):
+        xx = px(la)
+        s.append(f'<line x1="{xx:.1f}" y1="{y0}" x2="{xx:.1f}" y2="{y0+2}" stroke="{SC_INK}" stroke-width="0.6"/>')
+        s.append(f'<text x="{xx:.1f}" y="{y0+8:.1f}" text-anchor="middle" fill="{SC_MUTE}" font-size="5.4">{la}°</text>')
+    s.append(f'<text x="{(x0+x1)/2:.0f}" y="{VH-3}" text-anchor="middle" fill="{SC_MUTE}" font-size="6" letter-spacing="0.8" style="text-transform:uppercase;">launch angle</text>')
+    s.append(f'<text x="9" y="{(y0+y1)/2:.0f}" text-anchor="middle" fill="{SC_MUTE}" font-size="6" letter-spacing="0.8" style="text-transform:uppercase;" transform="rotate(-90 9 {(y0+y1)/2:.0f})">exit velocity (mph)</text>')
+    s.append(f'<text x="{x1-1}" y="{py(95)-2:.1f}" text-anchor="end" fill="{SC_RED}" font-size="5" font-style="italic">95 mph · hard-hit</text>')
+    # Points.
+    for r in statcast:
+        ev, la = _num(r.get("ev_mph")), _num(r.get("la_deg"))
+        if ev is None or la is None:
+            continue
+        cx = px(max(la_lo, min(la_hi, la)))
+        cy = py(max(ev_lo, min(ev_hi, ev)))
+        col = _xba_color(r.get("xba"))
+        rad = 2.0 + (1.6 if _is_hit(r.get("result")) else 0)
+        if _truthy(r.get("is_barrel")):
+            s.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rad+1.6:.1f}" fill="none" stroke="{SC_RED}" stroke-width="0.8"/>')
+        s.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rad:.1f}" fill="{col}" stroke="{SC_INK}" stroke-width="0.4" opacity="0.92"/>')
+    s.append("</svg>")
+    return "".join(s)
+
+
+def _svg_break(pitches: list[dict], plays: list[dict]) -> str:
+    """Pitch-movement plot (catcher's view): horizontal vs induced-vertical break."""
+    rows = [p for p in pitches if _num(p.get("hb_in")) is not None and _num(p.get("ivb_in")) is not None]
+    if len(rows) < 6:
+        return ""
+    VW, VH = 224, 224
+    s = _svg_open(380, 380, VW, VH, "sc-break")
+    _svg_title(s, VW, "Pitch Movement", "horizontal × induced vertical break, in.")
+    cx, cy, R = VW / 2 + 4, VH / 2 + 8, 78
+    lim = 26
+
+    def px(hb):
+        return cx + hb / lim * R
+
+    def py(ivb):
+        return cy - ivb / lim * R
+    # Concentric reference rings + crosshair.
+    for rr in (10, 20):
+        s.append(f'<circle cx="{cx}" cy="{cy}" r="{rr/lim*R:.1f}" fill="none" stroke="{SC_HAIR}" stroke-width="0.5" stroke-dasharray="2 3"/>')
+        s.append(f'<text x="{cx+rr/lim*R+1:.1f}" y="{cy-1:.1f}" fill="{SC_MUTE}" font-size="4.6">{rr}"</text>')
+    s.append(f'<line x1="{cx-R-6}" y1="{cy}" x2="{cx+R+6}" y2="{cy}" stroke="{SC_INK}" stroke-width="0.7"/>')
+    s.append(f'<line x1="{cx}" y1="{cy-R-6}" x2="{cx}" y2="{cy+R+6}" stroke="{SC_INK}" stroke-width="0.7"/>')
+    s.append(f'<text x="{cx}" y="{cy-R-9:.1f}" text-anchor="middle" fill="{SC_MUTE}" font-size="5">rise</text>')
+    s.append(f'<text x="{cx}" y="{cy+R+13:.1f}" text-anchor="middle" fill="{SC_MUTE}" font-size="5">drop</text>')
+    s.append(f'<text x="{cx+R+9:.1f}" y="{cy+1.6:.1f}" text-anchor="middle" fill="{SC_MUTE}" font-size="5">arm</text>')
+    s.append(f'<text x="{cx-R-9:.1f}" y="{cy+1.6:.1f}" text-anchor="middle" fill="{SC_MUTE}" font-size="5">glove</text>')
+    # Plot each pitch, coloured by family.
+    fams_present = {}
+    for p in rows:
+        hb, ivb = _num(p.get("hb_in")), _num(p.get("ivb_in"))
+        fam = _PITCH_FAMILY.get((p.get("type_code") or "").upper(), "other")
+        col = SC_CAT[fam]
+        fams_present[fam] = col
+        # Mirror horizontal break is already from the pitcher's hand; plot raw.
+        s.append(f'<circle cx="{px(max(-lim,min(lim,hb))):.1f}" cy="{py(max(-lim,min(lim,ivb))):.1f}" r="2.1" fill="{col}" stroke="{SC_PAPER}" stroke-width="0.35" opacity="0.78"/>')
+    # Legend.
+    order = [("fastball", "Fastball"), ("breaking", "Breaking"), ("offspeed", "Offspeed"), ("other", "Other")]
+    lx, ly = 16, VH - 12
+    for fam, lbl in order:
+        if fam not in fams_present:
+            continue
+        s.append(f'<circle cx="{lx}" cy="{ly}" r="2.2" fill="{SC_CAT[fam]}"/>')
+        s.append(f'<text x="{lx+5}" y="{ly+1.8:.0f}" fill="{SC_MUTE}" font-size="5.6">{lbl}</text>')
+        lx += 14 + len(lbl) * 3.1
+    s.append("</svg>")
+    return "".join(s)
+
+
+def _statcast_leaderboard(statcast, pitches, away_short, home_short, away_id, home_id):
+    """Returns the markdown for the STATCAST LEADERBOARD fact box."""
+    def team_of(r):
+        tid = str(r.get("team_id") or "")
+        if tid and str(away_id) and tid == str(away_id):
+            return away_short
+        if tid and str(home_id) and tid == str(home_id):
+            return home_short
+        return ""
+    rows = []
+
+    def add(label, picker, fmt, pool):
+        best = None
+        for r in pool:
+            v = picker(r)
+            if v is None:
+                continue
+            if best is None or v > best[0]:
+                best = (v, r)
+        if best:
+            rows.append((label, fmt(best[0], best[1])))
+
+    def nm(name):  # bold inside a raw-HTML cell needs <strong>, not **…**
+        return f"<strong>{last_name(name)}</strong>"
+    bip = [r for r in statcast]
+    hrs = [r for r in statcast if (r.get("result") or "").strip().lower() == "home run"]
+    add("Hardest hit", lambda r: _num(r.get("ev_mph")),
+        lambda v, r: f"{nm(r.get('batter',''))} · {v:.1f} mph", bip)
+    add("Longest HR", lambda r: _num(r.get("distance_ft")),
+        lambda v, r: f"{nm(r.get('batter',''))} · {int(v)} ft", hrs)
+    # Best barrel = barrel with the highest expected BA.
+    barrels = [r for r in statcast if _truthy(r.get("is_barrel"))]
+    add("Best barrel", lambda r: _num(r.get("xba")),
+        lambda v, r: f"{nm(r.get('batter',''))} · {_num(r.get('ev_mph')):.0f}/{_num(r.get('la_deg')):.0f}° <span class='xv'>xBA {_fmt_xba(r.get('xba'))}</span>", barrels)
+    add("Fastest bat", lambda r: _num(r.get("bat_speed")),
+        lambda v, r: f"{nm(r.get('batter',''))} · {v:.1f} mph", bip)
+    add("Fastest pitch", lambda r: _num(r.get("speed_mph")),
+        lambda v, r: f"{nm(_pn(r))} · {v:.1f} mph {_compact_ptype(r.get('type_desc',''))}".strip(), pitches)
+    add("Most spin", lambda r: _num(r.get("spin_rpm")),
+        lambda v, r: f"{nm(_pn(r))} · {int(v)} rpm {_compact_ptype(r.get('type_desc',''))}".strip(), pitches)
+    # Biggest break = greatest total movement (ivb²+hb²).
+    def total_break(r):
+        a, b = _num(r.get("ivb_in")), _num(r.get("hb_in"))
+        if a is None or b is None:
+            return None
+        return (a * a + b * b) ** 0.5
+    add("Biggest break", total_break,
+        lambda v, r: f"{nm(_pn(r))} · {v:.1f} in {_compact_ptype(r.get('type_desc',''))}".strip(), pitches)
+    if not rows:
+        return ""
+    body = "\n".join(f"<tr><td class='lbl'>{lbl}</td><td>{val}</td></tr>" for lbl, val in rows)
+    return f"<table class='statcast-leaders'><tbody>\n{body}\n</tbody></table>"
+
+
+def _fmt_xba(x) -> str:
+    v = _num(x)
+    return f"{v:.3f}".lstrip("0") if v is not None else "—"
+
+
+def _pmname_pitcher_lookup(pitches, plays):
+    """Annotate each pitch row with its pitcher's name (from the parent play)."""
+    play_by_idx = {str(p.get("idx")): p for p in plays}
+    for p in pitches:
+        pl = play_by_idx.get(str(p.get("play_idx")))
+        p["_pitcher"] = (pl or {}).get("pitcher", "")
+
+
+def _pn(r) -> str:
+    """Pitcher name for a pitch row (set by _pmname_pitcher_lookup)."""
+    return r.get("_pitcher", "") or ""
+
+
+def _expected_outcomes(statcast):
+    """Robbed (hard-hit outs) and lucky (soft hits) tables — the xBA story."""
+    robbed, lucky = [], []
+    for r in statcast:
+        xba = _num(r.get("xba"))
+        if xba is None:
+            continue
+        is_hit = _is_hit(r.get("result"))
+        if not is_hit and xba >= 0.500:
+            robbed.append((xba, r))
+        elif is_hit and xba <= 0.220 and (r.get("result") or "").lower() != "home run":
+            lucky.append((xba, r))
+    robbed.sort(key=lambda t: -t[0])
+    lucky.sort(key=lambda t: t[0])
+
+    def line(r, xba):
+        ev = _num(r.get("ev_mph"))
+        evs = f"{ev:.0f} mph" if ev is not None else "—"
+        return (f"<tr><td><strong>{last_name(r.get('batter',''))}</strong></td>"
+                f"<td>{(r.get('result') or '').strip()}</td>"
+                f"<td class='num'>{evs}</td>"
+                f"<td class='num'>{_fmt_xba(xba)}</td></tr>")
+    parts = []
+    if robbed:
+        body = "\n".join(line(r, x) for x, r in robbed[:4])
+        parts.append(
+            "**Hard-hit, nothing to show for it** — high expected average, retired anyway.\n\n"
+            "<table class='xoutcomes'><thead><tr><th>Batter</th><th>Result</th>"
+            f"<th class='num'>EV</th><th class='num'>xBA</th></tr></thead><tbody>\n{body}\n</tbody></table>")
+    if lucky:
+        body = "\n".join(line(r, x) for x, r in lucky[:4])
+        parts.append(
+            "**Found a hole** — soft contact that fell in.\n\n"
+            "<table class='xoutcomes'><thead><tr><th>Batter</th><th>Result</th>"
+            f"<th class='num'>EV</th><th class='num'>xBA</th></tr></thead><tbody>\n{body}\n</tbody></table>")
+    return "\n\n".join(parts)
+
+
+def build_statcast_section(dataset, away_short, home_short, away_abbr, home_abbr) -> str:
+    """Assemble the full ## STATCAST section markdown, or '' if no data."""
+    statcast = dataset.get("statcast") or []
+    if not statcast:
+        return ""
+    g = dataset["game"]
+    pitches = dataset.get("pitches") or []
+    plays = dataset.get("plays") or []
+    _pmname_pitcher_lookup(pitches, plays)
+    away_id = g.get("away_team_id", "")
+    home_id = g.get("home_team_id", "")
+    source = (statcast[0].get("source") or "savant")
+    src_note = ("Baseball Savant + MLB Stats API" if source == "savant"
+                else "MLB Stats API (Savant unavailable — expected stats omitted)")
+
+    spray = _svg_spray(statcast, away_short, home_short, away_id, home_id)
+    evla = _svg_ev_la(statcast)
+    brk = _svg_break(pitches, plays)
+    leaders = _statcast_leaderboard(statcast, pitches, away_short, home_short, away_id, home_id)
+    outcomes = _expected_outcomes(statcast)
+
+    # Charts row 1: spray + EV/LA. Row 2: movement + leaderboard.
+    chart_css_note = ""
+    md = ["## ⌖ STATCAST", "",
+          f"<p class='sc-source'>Tracking: {src_note}.</p>", ""]
+    md.append("<div class='sc-grid'>")
+    if spray:
+        md.append(f"<figure class='sc-fig'>{spray}</figure>")
+    if evla:
+        md.append(f"<figure class='sc-fig'>{evla}</figure>")
+    md.append("</div>")
+    md.append("")
+    md.append("<div class='sc-grid'>")
+    if brk:
+        md.append(f"<figure class='sc-fig'>{brk}</figure>")
+    if leaders:
+        md.append(f"<div class='sc-leaderwrap'><h3 class='sc-h3'>Game Leaders</h3>\n\n{leaders}</div>")
+    md.append("</div>")
+    if outcomes:
+        md.append("")
+        md.append("<h3 class='sc-h3'>Expected vs. Actual</h3>")
+        md.append("")
+        md.append(outcomes)
+    return "\n".join(md)
 
 
 def _top_batters(batting: list[dict], team_short: str, n: int = 3) -> list[dict]:
@@ -673,7 +1158,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     subhead = "### " + " · ".join(subhead_bits) if subhead_bits else ""
 
     venue = g.get("venue") or ""
-    dateline = f"**{venue.upper() if venue else 'MLB'}, {fmt_date(g['date'])}.**"
+    dateline = f'<span class="dateline">{venue.upper() if venue else "MLB"}, {fmt_date(g["date"])}.</span>'
 
     # --- AP lede ---
     verb = "blanked" if l_score == 0 else "defeated"
@@ -866,7 +1351,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         desc = first_sentence((pl.get("description") or "").strip()).replace("\n", " ").rstrip(". ")
         a = int(pl.get("away_score_after") or 0)
         h = int(pl.get("home_score_after") or 0)
-        glyph = "⚾" if pl.get("event") == "Home Run" else "·"
+        glyph = "✦" if pl.get("event") == "Home Run" else "·"
         glyph_span = f'<span class="sc-glyph">{glyph}</span>'
         # Anchor link: each PBP list item gets id="play-N"; clicking the
         # inning cell jumps to the matching play below. Team pill replaces
@@ -1096,13 +1581,13 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
             pitcher_changed = bool(last_pitcher) and pitcher != last_pitcher
             if pitcher_changed:
                 items.append(
-                    f'    <span class="pitching-change">🔄 <strong>Pitching change:</strong> '
+                    f'    <span class="pitching-change">⇌ <strong>Pitching change:</strong> '
                     f'{last_pitcher} → {pitcher}</span>'
                 )
             first_pa_for_pitcher = (last_pitcher is None) or pitcher_changed
             last_pitcher = pitcher
 
-            event_marker = "⚾ " if event == "Home Run" else ""
+            event_marker = "✦ " if event == "Home Run" else ""
             tag = pl.get("event_tag") or ""
             tag_prefix = (sb_tag_html(tag) + " ") if tag else ""
             # Compact single-line format: count "B-S, NP" (one pitch shows as "1P").
@@ -1214,11 +1699,11 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         broadcast_html = library_dir / f"{ds_name}-broadcast.html"
         broadcast_md = library_dir / f"{ds_name}-broadcast.md"
         if broadcast_html.exists():
-            ref_parts.append(f'<a href="{ds_name}-broadcast.html" title="1930s radio broadcast">🎙 1930s radio call</a>')
+            ref_parts.append(f'<a href="{ds_name}-broadcast.html" title="1930s radio broadcast">▶ 1930s radio call</a>')
         elif broadcast_md.exists():
-            ref_parts.append(f'<a href="{ds_name}-broadcast.md" title="1930s radio broadcast (Markdown)">🎙 1930s radio call</a>')
-        ref_parts.append(f'<a href="{ds_name}.md" title="Markdown source">📄 .md</a>')
-    external_refs = '<p class="external-refs">Also at: ' + " · ".join(ref_parts) + '</p>'
+            ref_parts.append(f'<a href="{ds_name}-broadcast.md" title="1930s radio broadcast (Markdown)">▶ 1930s radio call</a>')
+        ref_parts.append(f'<a href="{ds_name}.md" title="Markdown source">§ .md</a>')
+    external_refs = '<p class="external-refs">† Also at: ' + " · ".join(ref_parts) + '</p>'
 
     # Compact symbol-driven AT A GLANCE banner (replaces the former 2-col table).
     # Every line leads with a recognizable glyph; team badges anchor the score;
@@ -1228,7 +1713,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     # AT A GLANCE is now the game-context card: venue, crowd, time, weather,
     # umpires. The W/L/SV decisions and team records live in the LINE SCORE
     # column (decisions_block + records_line) so we don't duplicate them.
-    wind_piece = f" · 💨 {wind_arrow(wind)}" if wind else ""
+    wind_piece = f" · ➤ {wind_arrow(wind)}" if wind else ""
     # Compute pace (minutes per half-inning) as a small novelty stat —
     # surfaces something the line score can't already show at a glance.
     pace_line = ""
@@ -1238,14 +1723,14 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
             h_, m_ = dur_s.split(":")[:2]
             total_min = int(h_) * 60 + int(m_)
             half_innings = max(1, len([i for i in linescore if i.get("inning") not in ("R","H","E")])) * 2
-            pace_line = f"⏲ {total_min // half_innings}m per half-inning"
+            pace_line = f"◷ {total_min // half_innings}m per half-inning"
     except (ValueError, TypeError):
         pass
     glance_lines = [
         f'<p class="score">{away_pill} {away_r} — {home_r} {home_pill}</p>',
-        f"🏟 {venue} · 👥 {att} · ⏱ {dur} · 🕕 {first_pitch}",
-        f"☀ {wx}{wind_piece}" if wx and wx != "—" else "",
-        f"⚖ {tag_umpires(umps)}" if umps and umps != "—" else "",
+        f"⌂ {venue} · ◉ {att} · ◷ {dur} · ◴ {first_pitch}",
+        f"☼ {wx}{wind_piece}" if wx and wx != "—" else "",
+        f"§ {tag_umpires(umps)}" if umps and umps != "—" else "",
         pace_line,
     ]
     at_glance = '<div class="glance">\n\n' + "\n\n".join(s for s in glance_lines if s) + "\n\n</div>"
@@ -1294,7 +1779,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     if wx and wx != "—":
         wx_glyph = weather_glyph(str(wx))
-        wind_clause = f" · \U0001f4a8 Wind {wind_arrow(wind)}" if wind else ""
+        wind_clause = f" · ➤ Wind {wind_arrow(wind)}" if wind else ""
         atmosphere_rows.append(f"- **Weather.** {wx_glyph} {wx}{wind_clause}")
     if g.get("city") and g.get("state"):
         atmosphere_rows.append(
@@ -1429,7 +1914,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     attended_banner = ""
     if attended:
-        bits = ["🎟 *Attended.*"]
+        bits = ["★ *Attended.*"]
         if seat_line:
             bits.append(seat_line)
         if companion_line:
@@ -1472,7 +1957,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         if photos or videos:
             parts: list[str] = []
             if photos:
-                parts.append("**📷 Photos** (" + str(len(photos)) + ")")
+                parts.append("**◈ Photos** (" + str(len(photos)) + ")")
                 parts.append(
                     "\n".join(
                         f'- <a href="{slug_name}/photos/{p.name}">{p.stem}</a>'
@@ -1480,7 +1965,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
                     )
                 )
             if videos:
-                parts.append("**🎥 Videos** (" + str(len(videos)) + ")")
+                parts.append("**▶ Videos** (" + str(len(videos)) + ")")
                 parts.append(
                     "\n".join(
                         f'- <a href="{slug_name}/videos/{v.name}">{v.stem}</a>'
@@ -1491,29 +1976,29 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
     # --- Notes section (three columns: away lineup · home lineup · game context) ---
     # Symbols chosen for scannability (baseball-page conventions where possible):
-    # ⚖ umpires · 👥 attendance · ⏱ duration · 🕕 first pitch · 💨 wind · 📋 records
-    # ⚠ balks / wild pitches · 🎯 pickoffs · 🚪 ejections · ⏰ pitch-timer violations
+    # § umpires · ◉ attendance · ◷ duration · ◴ first pitch · ➤ wind · ✎ records
+    # ⚠ balks / wild pitches · ◎ pickoffs · ✕ ejections · ⚠ pitch-timer violations
     NOTE_GLYPH = {
-        "Umpires": "⚖",
-        "First pitch": "🕕",
-        "Attendance": "👥",
-        "Duration": "⏱",
-        "Weather": "☀",
-        "Wind": "💨",
-        "Records": "📋",
-        "WP": "⚡",
-        "PB": "✋",
+        "Umpires": "§",
+        "First pitch": "◴",
+        "Attendance": "◉",
+        "Duration": "◷",
+        "Weather": "☼",
+        "Wind": "➤",
+        "Records": "✎",
+        "WP": "▲",
+        "PB": "▼",
         "Balk": "⚠",
-        "HBP": "💥",
+        "HBP": "✕",
         "IBB": "⊕",
-        "SB": "⚡",
+        "SB": "▲",
         "CS": "⊗",
         "E": "✕",
         "DP": "⇉",
-        "Pickoffs": "🎯",
-        "Ejections": "🚪",
-        "Disengagement violations": "⏰",
-        "Pitch timer violations": "⏰",
+        "Pickoffs": "◎",
+        "Ejections": "✕",
+        "Disengagement violations": "⚠",
+        "Pitch timer violations": "⚠",
     }
 
     def _note_line(label: str, value: str) -> str:
@@ -1573,7 +2058,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
         + ("\n".join(home_lineup) if home_lineup else "_—_")
         + "\n\n</section>\n\n"
         "<section>\n\n"
-        "**📋 Game notes**\n\n"
+        "**✎ Game notes**\n\n"
         + ("\n".join(game_notes_lines) if game_notes_lines else "_No notable events logged._")
         + "\n\n</section>\n\n"
         "</div>"
@@ -1731,12 +2216,17 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
     # boxscore on Baseball-Reference — they don't mind inbound links).
     headline_md = f"[{headline}]({br_url})" if br_url else headline
 
+    # Statcast section (charts + leaderboard + expected-vs-actual). Empty
+    # string when the dataset predates statcast.csv or carried no batted balls.
+    statcast_section = build_statcast_section(dataset, away_short, home_short, away_abbr, home_abbr)
+    statcast_block = (statcast_section + "\n\n") if statcast_section else ""
+
     md = f"""{frontmatter}
 # {headline_md}
 {subhead}
 {external_refs}
 {attended_banner}
-{lede_para}
+<p class="lede">{lede_para}</p>
 
 ---
 
@@ -1764,7 +2254,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 </div>
 
-## ✨ TOP PERFORMERS
+## ★ TOP PERFORMERS
 
 {performers_block}
 
@@ -1820,7 +2310,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 </div>
 
-<div class="twocol">
+{statcast_block}<div class="twocol">
 
 <section>
 
@@ -1832,7 +2322,7 @@ def render_markdown(dataset: dict) -> tuple[str, dict]:
 
 <section>
 
-## ★ MOMENT OF THE GAME
+## ☞ MOMENT OF THE GAME
 
 {moment_block}
 

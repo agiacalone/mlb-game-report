@@ -32,6 +32,134 @@ def fetch_json(url: str) -> dict:
         return json.load(r)
 
 
+SAVANT_GF = "https://baseballsavant.mlb.com/gf?game_pk={pk}"
+
+
+def fetch_savant(game_pk: int) -> dict | None:
+    """Fetch Baseball Savant's game-feed (gf) JSON.
+
+    Carries the expected-stats + bat-tracking columns the MLB Stats API omits
+    (xBA, bat speed, barrel flags). Best-effort: any failure (network, 4xx/5xx,
+    rate-limit, schema drift) returns None so the caller falls back to the
+    feed/live hitData already in hand. A browser-ish UA avoids the occasional
+    bot challenge.
+    """
+    req = urllib.request.Request(
+        SAVANT_GF.format(pk=game_pk),
+        headers={"User-Agent": "Mozilla/5.0 (mlb-game-report)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return json.load(r)
+    except Exception as e:  # noqa: BLE001 — degrade, never abort the dataset
+        print(f"Savant unavailable ({e}); Statcast falls back to feed/live hitData.",
+              file=sys.stderr)
+        return None
+
+
+def _barrel_approx(ev, la) -> str:
+    """Approximate the Statcast 'barrel' classification from EV + LA.
+
+    Used only on the Savant-down fallback path, where the authoritative
+    is_barrel flag is absent. Implements the canonical definition: ≥98 mph,
+    with the qualifying launch-angle window widening 2°–3° per mph above 98
+    (at 98 mph: 26°–30°). Returns "1"/"0"/"" (blank when EV/LA missing).
+    """
+    try:
+        ev = float(ev)
+        la = float(la)
+    except (TypeError, ValueError):
+        return ""
+    if ev < 98:
+        return "0"
+    lo = 26 - (ev - 98) * 1.0
+    hi = 30 + (ev - 98) * 1.5
+    lo, hi = max(lo, 8), min(hi, 50)
+    return "1" if lo <= la <= hi else "0"
+
+
+def build_statcast(game_pk: int, plays_rows: list[dict], pitches_rows: list[dict]) -> list[dict]:
+    """One row per ball in play, preferring Baseball Savant, else feed/live.
+
+    Savant path carries xBA, bat speed and the authoritative barrel flag.
+    Fallback path reconstructs EV/LA/distance/spray from the pitch rows we
+    already fetched (no expected stats / bat tracking)."""
+    savant = fetch_savant(game_pk)
+    rows: list[dict] = []
+    if savant:
+        # The `exit_velocity` array is Savant's per-batted-ball game table,
+        # spanning both teams. Each row already carries the spray coords,
+        # expected BA, barrel flag and bat speed.
+        for r in savant.get("exit_velocity", []) or []:
+            if r.get("hit_speed") in (None, "", "null") and r.get("hc_x") in (None, ""):
+                continue
+            rows.append({
+                "play_idx": r.get("ab_number", ""),  # Savant ab# aligns with StatsAPI atBatIndex
+                "ab_number": r.get("ab_number", ""),
+                "inning": r.get("inning", ""),
+                "half": r.get("half_inning", ""),
+                "team_id": r.get("team_batting_id", ""),
+                "batter": r.get("batter_name", ""),
+                "batter_id": r.get("batter", ""),
+                "stand": r.get("stand", ""),
+                "pitcher": r.get("pitcher_name", ""),
+                "p_throws": r.get("p_throws", ""),
+                "pitch_name": r.get("pitch_name", ""),
+                "pitch_mph": r.get("start_speed", ""),
+                "spin_rpm": r.get("spin_rate", ""),
+                "result": r.get("result", "") or r.get("events", ""),
+                "description": (r.get("des", "") or "").replace("\n", " "),
+                "ev_mph": r.get("hit_speed", ""),
+                "la_deg": r.get("hit_angle", ""),
+                "distance_ft": r.get("hit_distance", ""),
+                "xba": r.get("xba", ""),
+                "is_barrel": r.get("is_barrel", ""),
+                "bat_speed": r.get("batSpeed", ""),
+                "hc_x": r.get("hc_x", ""),
+                "hc_y": r.get("hc_y", ""),
+                "source": "savant",
+            })
+    if rows:
+        return rows
+    # --- Fallback: reconstruct from feed/live hitData on the pitch rows ---
+    play_by_idx = {int(p["idx"]): p for p in plays_rows}
+    for pi in pitches_rows:
+        ev = pi.get("ev_mph")
+        hx = pi.get("hit_x")
+        if ev in (None, "") and hx in (None, ""):
+            continue
+        play = play_by_idx.get(int(pi.get("play_idx") or -1))
+        if not play:
+            continue
+        rows.append({
+            "play_idx": play["idx"],
+            "ab_number": play["idx"],
+            "inning": play.get("inning", ""),
+            "half": play.get("half", ""),
+            "team_id": "",
+            "batter": play.get("batter", ""),
+            "batter_id": play.get("batter_id", ""),
+            "stand": "",
+            "pitcher": play.get("pitcher", ""),
+            "p_throws": "",
+            "pitch_name": pi.get("type_desc", ""),
+            "pitch_mph": pi.get("speed_mph", ""),
+            "spin_rpm": pi.get("spin_rpm", ""),
+            "result": play.get("event", ""),
+            "description": play.get("description", ""),
+            "ev_mph": ev or "",
+            "la_deg": pi.get("la_deg", ""),
+            "distance_ft": pi.get("distance_ft", ""),
+            "xba": "",
+            "is_barrel": _barrel_approx(ev, pi.get("la_deg")),
+            "bat_speed": "",
+            "hc_x": pi.get("hit_x", ""),
+            "hc_y": pi.get("hit_y", ""),
+            "source": "feed",
+        })
+    return rows
+
+
 def resolve_team(team: str) -> int:
     if team.isdigit():
         return int(team)
@@ -178,13 +306,15 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
             type_info = det.get("type") or {}
             call_info = det.get("call") or {}
             coords_p = pd.get("coordinates") or {}
+            breaks = pd.get("breaks") or {}
+            hcoords = hd.get("coordinates") or {}
             pitches_rows.append({
                 "play_idx": idx,
                 "pitch_num": pnum,
                 "type_code": type_info.get("code", ""),
                 "type_desc": type_info.get("description", ""),
                 "speed_mph": pd.get("startSpeed", ""),
-                "spin_rpm": (pd.get("breaks") or {}).get("spinRate", ""),
+                "spin_rpm": breaks.get("spinRate", ""),
                 "call": call_info.get("description", ""),
                 "px": coords_p.get("pX", ""),
                 "pz": coords_p.get("pZ", ""),
@@ -194,6 +324,14 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
                 "trajectory": hd.get("trajectory", ""),
                 "hit_location": hd.get("location", ""),
                 "hardness": hd.get("hardness", ""),
+                # Movement profile (deep in-payload Statcast).
+                "ivb_in": breaks.get("breakVerticalInduced", ""),
+                "hb_in": breaks.get("breakHorizontal", ""),
+                "spin_dir": breaks.get("spinDirection", ""),
+                "ext_ft": pd.get("extension", ""),
+                # Gameday landing coords — fallback spray source.
+                "hit_x": hcoords.get("coordX", ""),
+                "hit_y": hcoords.get("coordY", ""),
             })
 
     # Also capture hit events that aren't on a pitch (rare; mostly covered above).
@@ -374,8 +512,10 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         "home_team_id": home["team"]["id"],
         "home_team_short": home_short,
         "home_abbr": home_abbr,
-        "away_score": away.get("score", 0),
-        "home_score": home.get("score", 0),
+        # schedule?gamePk= can return the postponed/stub record for makeup games
+        # with score=None; fall back to linescore which always reflects the played game.
+        "away_score": away.get("score") if away.get("score") is not None else (line.get("teams", {}).get("away", {}).get("runs", 0) or 0),
+        "home_score": home.get("score") if home.get("score") is not None else (line.get("teams", {}).get("home", {}).get("runs", 0) or 0),
         "winning_pitcher": wp,
         "losing_pitcher": lp,
         "save_pitcher": sv,
@@ -390,6 +530,8 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         "notable_events_json": json.dumps(notable) if notable else "",
     }
 
+    statcast_rows = build_statcast(game_pk, plays_rows, pitches_rows)
+
     return {
         "game": game_row,
         "linescore": line_rows,
@@ -397,6 +539,7 @@ def build_dataset(game_pk: int, attended_meta: dict | None = None) -> dict:
         "pitching": pitching_rows,
         "plays": plays_rows,
         "pitches": pitches_rows,
+        "statcast": statcast_rows,
     }
 
 

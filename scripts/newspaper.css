@@ -169,10 +169,37 @@ hr {
   margin: 2em 0;
 }
 hr::before {
-  content: "§ § §";
+  content: "§   §   §";
   color: var(--rule);
   letter-spacing: 0.4em;
   font-size: 0.9em;
+}
+
+/* Lede paragraph — set in a slightly larger size, with a hot-metal drop cap
+   on the very first letter. Mirrors the way old papers led the column with
+   a single oversized initial; the rest of the lede stays in body type. */
+p.lede {
+  font-size: 1.06em;
+  line-height: 1.55;
+  margin-top: 0.6em;
+}
+p.lede::first-letter {
+  float: left;
+  font-family: "Old Standard TT", "Playfair Display", Georgia, serif;
+  font-size: 3.4em;
+  line-height: 0.9;
+  font-weight: 700;
+  padding: 0.05em 0.12em 0 0;
+  margin-right: 0.04em;
+  color: var(--accent, #8b1a1a);
+}
+
+/* Dateline — small-caps, letter-spaced, like an AP wire stamp. The Python
+   side wraps "VENUE, DATE." in <span class="dateline">. */
+.dateline {
+  font-variant: small-caps;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
 /* Footer / source credit */
@@ -607,7 +634,7 @@ body ul li { margin: 0.12rem 0; }
   .sb-fc   { background: #5a5040; color: #e8e2d0; }
 }
 
-/* Scoring-play PBP items — subtle left-accent hint. Not too heavy; the ⚾/·
+/* Scoring-play PBP items — subtle left-accent hint. Not too heavy; the ✦/·
    glyph already flags the play, this just nudges the eye. */
 .pbp-scoring {
   padding-left: 0.4em;
@@ -799,7 +826,7 @@ nav.site-nav ul.site-nav-links a[aria-current="page"] {
   nav.site-nav ul.site-nav-links { gap: 0.8rem; font-size: 0.8rem; }
 }
 
-/* Scoring-table leading glyph — fixed-width column so ⚾ and · align. */
+/* Scoring-table leading glyph — fixed-width column so ✦ and · align. */
 .sc-glyph {
   display: inline-block;
   width: 1.1em;
@@ -884,4 +911,130 @@ p.records strong { color: var(--ink); font-weight: 700; }
 .pitching-change strong { font-weight: 700; letter-spacing: 0.04em; }
 @media (prefers-color-scheme: dark) {
   .pitching-change { background: rgba(217, 84, 68, 0.12); }
+}
+
+/* ============================================================================
+   STATCAST SECTION — charts + leaderboards + expected-vs-actual
+   The charts are self-contained SVG "clippings" (own cream backing); the page
+   chrome around them is kept to engraved hairlines so they read as pasted-in
+   infographics, in the broadsheet tradition of the engraved diagram.
+   ========================================================================== */
+
+/* Source/tracking caption directly under the ⌖ STATCAST rule */
+.sc-source {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 0.82rem;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+  margin: -0.2em 0 1.1em;
+}
+
+/* Two-up chart grid; collapses to a single column on narrow viewports */
+.sc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.4rem 1.6rem;
+  align-items: start;
+  margin: 0.6em 0 0.4em;
+}
+@media (max-width: 640px) {
+  .sc-grid { grid-template-columns: 1fr; }
+}
+
+/* Figure wrapper — lifts each clipping off the page with a hairline + soft
+   shadow, the way a pasted halftone sits proud of newsprint */
+.sc-fig {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+}
+.sc-fig .sc-chart {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.18), 2px 3px 7px rgba(26,26,26,0.10);
+}
+
+/* Leaderboard column sitting beside the movement plot */
+.sc-leaderwrap { align-self: stretch; }
+.sc-h3 {
+  font-family: var(--condensed);
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-style: normal;
+  color: var(--ink);
+  margin: 0.2em 0 0.6em;
+  padding-bottom: 0.22em;
+  border-bottom: 1px solid var(--ink);
+}
+
+/* GAME LEADERS — an agate ledger: small-caps label rail, ink values */
+table.statcast-leaders {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  margin: 0;
+}
+table.statcast-leaders td {
+  padding: 0.32em 0.2em;
+  border-bottom: 1px solid #e4ddcb;
+  vertical-align: baseline;
+  font-variant-numeric: tabular-nums;
+}
+table.statcast-leaders tr:last-child td { border-bottom: 0; }
+table.statcast-leaders td.lbl {
+  font-family: var(--condensed);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.74rem;
+  color: var(--muted);
+  white-space: nowrap;
+  width: 7.4em;
+  padding-right: 0.7em;
+}
+table.statcast-leaders td strong { font-weight: 700; }
+table.statcast-leaders .xv {
+  color: var(--accent);
+  font-style: italic;
+  font-size: 0.84em;
+}
+
+/* EXPECTED vs ACTUAL — twin tight tables (robbed / found-a-hole) */
+table.xoutcomes {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin: 0.3em 0 1.1em;
+  font-variant-numeric: tabular-nums;
+}
+table.xoutcomes thead th {
+  font-family: var(--condensed);
+  text-transform: uppercase;
+  font-variant: normal;
+  letter-spacing: 0.1em;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: transparent;   /* override the team-colour box-score header bar */
+  text-align: left;
+  border-bottom: 1.5px solid var(--ink);
+  padding: 0.2em 0.4em;
+}
+/* keep these ledger tables free of box-score zebra + team-colour chrome */
+table.statcast-leaders tbody tr:nth-child(even) td,
+table.xoutcomes tbody tr:nth-child(even) td { background: transparent; }
+table.xoutcomes td {
+  padding: 0.28em 0.4em;
+  border-bottom: 1px solid #e4ddcb;
+}
+table.xoutcomes td.num, table.xoutcomes th.num { text-align: right; }
+table.xoutcomes tbody tr:last-child td { border-bottom: 0; }
+table.xoutcomes td:last-child { color: var(--accent); font-weight: 700; }
+
+@media (prefers-color-scheme: dark) {
+  .sc-fig .sc-chart { box-shadow: 0 1px 0 rgba(0,0,0,0.5), 2px 4px 9px rgba(0,0,0,0.4); }
+  table.statcast-leaders td, table.xoutcomes td { border-bottom-color: rgba(0,0,0,0.18); }
 }
